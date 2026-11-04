@@ -4,14 +4,14 @@
 
 纯 C++17 / Win32 / GDI+ 实现 · 单个 exe · 无 .NET / Java / 第三方运行库 · 零注入、不挂钩、不读进程内存
 
-**版本 5.2.3** · Windows 10 / 11
+**版本 5.3.0** · Windows 10 / 11
 
 ## 功能
 
 - **时间显示**：24/12 小时制、秒、上/下午；日期、年份、星期与多种日期格式可自由组合
 - **外观**：深色 / 浅色 / 跟随系统；小 / 中 / 大三档尺寸；字体大小、粗体、不透明度可调
 - **消息提醒**：微信（界面读取）与 QQ（系统通知）新消息弹出圆形副岛，内部为真实应用图标；悬停查看内容，点击打开应用并收起；默认常驻；支持隐私模式（只显示"有新消息"）
-- **行为**：自动隐藏、全屏应用时隐藏、开机自启；托盘菜单；设置窗口内可直接打开 Windows 日期和时间设置
+- **行为**：自动隐藏、游戏全屏时隐藏（默认开启；视频 / 浏览器 / 演示等非游戏全屏保持可见并置顶）、开机自启；托盘菜单；设置窗口内可直接打开 Windows 日期和时间设置
 - **适配**：Per-Monitor V2 高 DPI、多显示器、跟随系统主题；左键打开设置、拖动移动位置
 - **兼容**：不注入、不挂钩、不读写聊天数据库，对游戏反作弊友好
 
@@ -43,6 +43,13 @@ cd time-dynamic-island
 - 设置窗口：`Enter` 确定、`Esc` 取消；"退出程序"带二次确认
 - **副岛**：悬停显示"发送者：内容"（隐私模式只显示"微信 有新消息"）；点击打开/恢复微信或 QQ 并收起该副岛；默认常驻，可在设置里改为 1–10 秒自动收起
 
+## 全屏行为
+
+- **非游戏全屏**（视频播放器、浏览器全屏视频、演示文稿等）：灵动岛保持可见，并自动置顶在全屏窗口之上，不会抢焦点
+- **游戏全屏**：灵动岛自动滑出隐藏，避免遮挡游戏；可在设置 → 行为 → 关闭"游戏全屏时隐藏"（新安装默认开启）
+- **检测方式**：Windows 报告独占 Direct3D 全屏（`QUNS_RUNNING_D3D_FULL_SCREEN`），或前台窗口铺满显示器且使用常见游戏引擎窗口类（`UnityWndClass` / `UnrealWindow` / `SDL_app` / `GLFW30` / `Valve001` / `CryENGINE` / `SGameWindow`）
+- **已知限制**：独占全屏游戏通常无法被置顶窗口覆盖，隐藏是正确行为；未列入名单的无边框游戏可能仍会显示灵动岛；使用独占 D3D 全屏的视频播放器会被当作游戏而隐藏
+
 ## 消息提醒规则
 
 **微信**（Windows UI Automation 读取会话列表，不注入、不读内存）
@@ -63,7 +70,7 @@ cd time-dynamic-island
 ## 配置
 
 - 位置：`HKCU\SOFTWARE\DynamicIsland`（`SettingsVersion = 2`）
-- 常用值：`Theme`、`WindowSize`、`Position`、`FontSize`、`BoldFont`、`Opacity`、`Use24Hour`、`ShowSeconds`、`ShowDate`、`DateFormat`、`AutoHide`、`HideDelaySeconds`、`HideOnFullscreen`、`NotifyEnable`、`NotifyShowContent`、`NotifyWeChat`、`NotifyQQ`、`NotifyPeekSeconds`（0 = 常驻）
+- 常用值：`Theme`、`WindowSize`、`Position`、`FontSize`、`BoldFont`、`Opacity`、`Use24Hour`、`ShowSeconds`、`ShowDate`、`DateFormat`、`AutoHide`、`HideDelaySeconds`、`HideOnFullscreen`（游戏全屏时隐藏，新安装默认开，旧配置保留原值）、`NotifyEnable`、`NotifyShowContent`、`NotifyWeChat`、`NotifyQQ`、`NotifyPeekSeconds`（0 = 常驻）
 - 手动修改注册表后重启程序生效；删除整个键恢复默认
 - 开机自启由 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 中的 `DynamicIsland` 值控制
 
@@ -82,11 +89,19 @@ docs/灵动岛实现计划.md  开发计划
 
 ## 常见问题
 
-- **看不到灵动岛**：检查是否被全屏应用隐藏，或使用托盘菜单"重置位置"
+- **看不到灵动岛**：检查是否被游戏全屏隐藏（非游戏全屏会保持可见），或使用托盘菜单"重置位置"
+- **看视频 / 演示时灵动岛还在吗**：在；只有检测到游戏全屏才会隐藏，其他全屏应用会保持可见并置顶
 - **收不到微信提醒**：确认微信正在运行；微信大版本更新可能改变其界面结构
 - **收不到 QQ 提醒**：确认 QQ 与 Windows 的通知开关均已打开
 - **公众号 / 订阅号 / 免打扰群不提醒**：这是 v5.2.2 起的预期行为
 - **重复启动**：默认单实例，再次运行会直接打开设置窗口
+
+## 更新日志
+
+- **v5.3.0**（2026-11-04）：非游戏全屏（视频 / 浏览器 / 演示）保持可见并自动置顶；仅游戏全屏隐藏；检测新增独占 D3D 判定与常见游戏引擎窗口类；设置项改名"游戏全屏时隐藏"，新安装默认开启
+- **v5.2.x**：微信 / QQ 消息副岛、提醒范围过滤、文件传输助手始终提醒、副岛默认常驻、图标缩小、设置窗口性能与布局优化
+- **v5.1**：退出程序按钮、系统时间设置入口、左键打开设置、新图标、设置窗口脏矩形重绘
+- **v5.0**：整体重写（逐像素 alpha 分层渲染、缓动动画、全自绘设置窗口、Per-Monitor V2）
 
 ## 许可证与免责声明
 
@@ -96,4 +111,4 @@ docs/灵动岛实现计划.md  开发计划
 
 ---
 
-版本 5.2.3 · 2026-10-30 · C++17 / Win32 / GDI+ / MSVC / C++/WinRT · UI Automation
+版本 5.3.0 · 2026-11-04 · C++17 / Win32 / GDI+ / MSVC / C++/WinRT · UI Automation

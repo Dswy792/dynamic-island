@@ -86,17 +86,13 @@ bool s_autoHideTimerRunning = false;
 
 void UpdateAutoHideTimerState()
 {
-    const bool needed = g_settings.autoHide || g_settings.hideOnFullscreen;
-    if (needed && !s_autoHideTimerRunning)
+    // The timer is always required: apart from auto-hide it tracks fullscreen
+    // apps (stay above video fullscreen, hide in exclusive D3D games).
+    if (!s_autoHideTimerRunning)
     {
         s_lastInsideTick = GetTickCount64();
         SetTimer(g_hwnd, kTimerAutoHide, kAutoHideCheckIntervalMs, nullptr);
         s_autoHideTimerRunning = true;
-    }
-    else if (!needed && s_autoHideTimerRunning)
-    {
-        KillTimer(g_hwnd, kTimerAutoHide);
-        s_autoHideTimerRunning = false;
     }
 }
 
@@ -258,40 +254,55 @@ void EndDrag(bool commit)
     }
 }
 
+void RaiseIslandAboveFullscreen()
+{
+    SetWindowPos(g_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+}
+
 void UpdateAutoHide()
 {
     const ULONGLONG now = GetTickCount64();
     POINT cursor = {};
     GetCursorPos(&cursor);
 
-    // Keep the island on screen while message circles are visible.
-    if (IsAnySubIslandVisible())
-    {
-        s_lastInsideTick = now;
-        return;
-    }
+    const bool gameFullscreen = IsGameFullscreenActive();
+    const bool otherFullscreen = !gameFullscreen && IsFullscreenAppActive();
+    static bool s_lastOtherFullscreen = false;
 
-    if (g_settings.hideOnFullscreen)
+    // Games in fullscreen (exclusive D3D or a known game engine window): hide
+    // the island instead of drawing on top of the game.
+    if (g_settings.hideOnFullscreen && gameFullscreen)
     {
-        const bool fullscreen = IsFullscreenAppActive();
-        if (fullscreen && !IsIslandHiddenTarget())
+        if (!IsIslandHiddenTarget())
         {
             s_hiddenByFullscreen = true;
             s_hovering = false;
             SetIslandHoverTarget(false);
             SetIslandHiddenTarget(true);
         }
-        else if (!fullscreen && s_hiddenByFullscreen)
-        {
-            s_hiddenByFullscreen = false;
-            SetIslandHiddenTarget(false);
-        }
     }
     else if (s_hiddenByFullscreen)
     {
         s_hiddenByFullscreen = false;
-        if (IsIslandHiddenTarget())
-            SetIslandHiddenTarget(false);
+        SetIslandHiddenTarget(false);
+    }
+
+    // Any other fullscreen app (video players, browser fullscreen video,
+    // presentations): keep the island visible and above it.
+    if (otherFullscreen)
+    {
+        if (!s_lastOtherFullscreen)
+            RevealIsland();
+        RaiseIslandAboveFullscreen();
+    }
+    s_lastOtherFullscreen = otherFullscreen;
+
+    // Keep the island on screen while message circles are visible.
+    if (IsAnySubIslandVisible())
+    {
+        s_lastInsideTick = now;
+        return;
     }
 
     if (!g_settings.autoHide)
@@ -791,14 +802,12 @@ void ApplySettingsAndRefresh()
 {
     ValidateSettings(g_settings);
 
-    if (!g_settings.autoHide && !g_settings.hideOnFullscreen)
-    {
+    if (!g_settings.hideOnFullscreen)
         s_hiddenByFullscreen = false;
-        if (IsIslandHiddenTarget())
-        {
-            SetIslandHiddenTarget(false);
-            SetIslandHoverTarget(s_hovering);
-        }
+    if (!g_settings.autoHide && !s_hiddenByFullscreen && IsIslandHiddenTarget())
+    {
+        SetIslandHiddenTarget(false);
+        SetIslandHoverTarget(s_hovering);
     }
 
     if (!g_settings.notifyEnable)

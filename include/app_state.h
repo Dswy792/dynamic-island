@@ -99,7 +99,7 @@ struct AppSettings
     int customY = -100000;
     bool autoHide = false;
     int hideDelaySeconds = 3;
-    bool hideOnFullscreen = false;
+    bool hideOnFullscreen = true;
     int fontSize = 14;
     bool boldFont = true;
     bool autoStart = false;

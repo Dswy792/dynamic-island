@@ -39,6 +39,48 @@ void ShowAboutDialog(HWND owner)
                 MB_OK | MB_ICONINFORMATION);
 }
 
+bool IsD3DFullscreenAppActive()
+{
+    QUERY_USER_NOTIFICATION_STATE state = QUNS_ACCEPTS_NOTIFICATIONS;
+    if (SUCCEEDED(SHQueryUserNotificationState(&state)))
+        return state == QUNS_RUNNING_D3D_FULL_SCREEN;
+    return false;
+}
+
+namespace
+{
+// Window classes used by common game engines when running borderless
+// fullscreen (they do not always trigger the exclusive D3D state).
+bool IsGameWindowClass(const wchar_t* className)
+{
+    static const wchar_t* const classes[] = {
+        L"UnityWndClass", L"UnrealWindow", L"SDL_app",
+        L"GLFW30", L"Valve001", L"CryENGINE", L"SGameWindow"};
+    for (const wchar_t* candidate : classes)
+    {
+        if (_wcsicmp(className, candidate) == 0)
+            return true;
+    }
+    return false;
+}
+} // namespace
+
+bool IsGameFullscreenActive()
+{
+    if (IsD3DFullscreenAppActive())
+        return true;
+
+    const HWND foreground = GetForegroundWindow();
+    if (foreground == nullptr)
+        return false;
+    wchar_t className[256] = {};
+    if (GetClassNameW(foreground, className, 256) <= 0)
+        return false;
+    if (!IsGameWindowClass(className))
+        return false;
+    return IsFullscreenAppActive();
+}
+
 bool IsFullscreenAppActive()
 {
     HWND foreground = GetForegroundWindow();

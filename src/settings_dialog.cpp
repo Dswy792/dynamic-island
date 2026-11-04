@@ -2047,7 +2047,7 @@ void SettingsWindow::DrawScene(Painter& painter)
                    m_pending.hideDelaySeconds > kHideDelayMinSeconds,
                    m_pending.hideDelaySeconds < kHideDelayMaxSeconds,
                    kIdDelayMinus, kIdDelayPlus);
-    DrawToggleRow(painter, layout.behaviorRows[2], L"全屏时隐藏",
+    DrawToggleRow(painter, layout.behaviorRows[2], L"游戏全屏时隐藏",
                   m_pending.hideOnFullscreen, true, kIdHideFullscreen);
     DrawToggleRow(painter, layout.behaviorRows[3], L"开机自启",
                   m_pending.autoStart, true, kIdAutoStart);
