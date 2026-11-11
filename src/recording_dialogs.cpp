@@ -1233,11 +1233,15 @@ void RecordingDialog::OnLButtonDown(POINT point)
 
 void RecordingDialog::OnLButtonUp(POINT point)
 {
+    // Read the pressed control BEFORE releasing capture: ReleaseCapture sends
+    // WM_CAPTURECHANGED synchronously, whose handler clears m_pressedControl,
+    // which used to make every button click look like a click on empty space.
+    const int pressed = m_pressedControl;
+    m_pressedControl = kCtrlNone;
+
     if (GetCapture() == m_hwnd)
         ReleaseCapture();
 
-    const int pressed = m_pressedControl;
-    m_pressedControl = kCtrlNone;
     if (pressed == kCtrlNone)
     {
         // A click on a wheel item scrolls it into the center.

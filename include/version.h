@@ -3,8 +3,8 @@
 // Central version information (also used by the settings / about UI).
 #define APP_VERSION_MAJOR 5
 #define APP_VERSION_MINOR 4
-#define APP_VERSION_PATCH 0
-#define APP_VERSION_STRING L"5.4.0"
-#define APP_VERSION_STRING_A "5.4.0"
+#define APP_VERSION_PATCH 1
+#define APP_VERSION_STRING L"5.4.1"
+#define APP_VERSION_STRING_A "5.4.1"
 #define APP_NAME L"Dynamic Island"
 #define APP_NAME_CN L"灵动岛"
