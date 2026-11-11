@@ -48,6 +48,15 @@ struct SubIslandContent
 SubIslandContent s_subContent[kNotificationSourceCount];
 int s_hoveredSub = -1;
 
+// v5.4 hover feature row / recording overlays.
+int s_featureSlotCount = 0;
+int s_hoveredFeatureSlot = -1;
+std::wstring s_countdownText;
+std::wstring s_toastText;
+bool s_toastError = false;
+RecordingActivityVisual s_activity;
+bool s_hasActivityVisual = false;
+
 struct SourceIconCache
 {
     Bitmap* bitmap = nullptr;
@@ -73,6 +82,27 @@ struct RenderSignature
     std::wstring content;
     std::wstring subTitle[kNotificationSourceCount];
     std::wstring subBody[kNotificationSourceCount];
+
+    // v5.4 overlays.
+    RECT featureRow = {};
+    RECT featureSlots[kFeatureSlotCount] = {};
+    RECT countdown = {};
+    RECT toast = {};
+    RECT activityCircle = {};
+    RECT activityTooltip = {};
+    int featureSlotCount = 0;
+    int hoveredFeatureSlot = -1;
+    int featureProgress255 = 0;
+    int activityProgress255 = 0;
+    int activityState = 0;
+    int activityPulseTick = 0;
+    int activityPress255 = 0;
+    bool activityHovered = false;
+    bool activityVisible = false;
+    std::wstring countdownText;
+    std::wstring toastText;
+    bool toastError = false;
+    std::wstring activityTooltipText;
 };
 
 RenderSignature s_lastSignature;
@@ -95,6 +125,30 @@ bool SignaturesEqual(const RenderSignature& a, const RenderSignature& b)
             a.subTitle[i] != b.subTitle[i] || a.subBody[i] != b.subBody[i])
             return false;
     }
+    if (!RectsEqual(a.featureRow, b.featureRow) ||
+        !RectsEqual(a.countdown, b.countdown) || !RectsEqual(a.toast, b.toast) ||
+        !RectsEqual(a.activityCircle, b.activityCircle) ||
+        !RectsEqual(a.activityTooltip, b.activityTooltip))
+        return false;
+    for (int i = 0; i < kFeatureSlotCount; ++i)
+    {
+        if (!RectsEqual(a.featureSlots[i], b.featureSlots[i]))
+            return false;
+    }
+    if (a.featureSlotCount != b.featureSlotCount ||
+        a.hoveredFeatureSlot != b.hoveredFeatureSlot ||
+        a.featureProgress255 != b.featureProgress255 ||
+        a.activityProgress255 != b.activityProgress255 ||
+        a.activityState != b.activityState ||
+        a.activityPulseTick != b.activityPulseTick ||
+        a.activityPress255 != b.activityPress255 ||
+        a.activityHovered != b.activityHovered ||
+        a.activityVisible != b.activityVisible)
+        return false;
+    if (a.countdownText != b.countdownText || a.toastText != b.toastText ||
+        a.toastError != b.toastError ||
+        a.activityTooltipText != b.activityTooltipText)
+        return false;
     return a.dpi == b.dpi && a.background == b.background && a.text == b.text &&
            a.border == b.border && a.opacity == b.opacity &&
            a.fontSize == b.fontSize && a.bold == b.bold &&
@@ -299,8 +353,11 @@ Bitmap* LoadSourceIcon(int sourceIndex)
 // Drawing primitives shared by the island and the settings preview
 // ---------------------------------------------------------------------------
 void DrawSoftShadow(Graphics& graphics, const RectF& shapeRect, REAL radius,
-                    const ThemePalette& palette, REAL dpiScale)
+                    const ThemePalette& palette, REAL dpiScale,
+                    REAL alphaScale = 1.0f)
 {
+    if (alphaScale <= 0.01f)
+        return;
     const BYTE shadowBase = palette.dark ? 11 : 8;
     for (int layer = 0; layer < kShadowLayers; ++layer)
     {
@@ -308,8 +365,8 @@ void DrawSoftShadow(Graphics& graphics, const RectF& shapeRect, REAL radius,
             static_cast<REAL>(layer) / static_cast<REAL>(kShadowLayers - 1);
         const REAL grow = (1.0f - k) * 8.0f * dpiScale;
         const REAL offset = (1.0f - k) * 5.0f * dpiScale;
-        const BYTE alpha =
-            static_cast<BYTE>(std::max(1.0f, shadowBase * (0.35f + 0.75f * k)));
+        const BYTE alpha = static_cast<BYTE>(std::max(
+            1.0f, shadowBase * (0.35f + 0.75f * k) * alphaScale));
         const RectF rect(shapeRect.X - grow, shapeRect.Y - grow + offset,
                          shapeRect.Width + grow * 2.0f,
                          shapeRect.Height + grow * 2.0f);
@@ -341,9 +398,11 @@ void FillCapsule(Graphics& graphics, const RectF& rect, REAL radius,
 }
 
 void StrokeCapsule(Graphics& graphics, const RectF& rect, REAL radius,
-                   const ThemePalette& palette, REAL dpiScale)
+                   const ThemePalette& palette, REAL dpiScale,
+                   REAL alphaScale = 1.0f)
 {
-    const BYTE borderAlpha = palette.dark ? 26 : 22;
+    const BYTE borderAlpha = static_cast<BYTE>(
+        (palette.dark ? 26 : 22) * std::max(0.0f, std::min(1.0f, alphaScale)));
     GraphicsPath* path = CreateRoundedRectPath(rect, radius);
     Pen pen(GdiColor(palette.islandBorder, borderAlpha), std::max(1.0f, dpiScale));
     graphics.DrawPath(&pen, path);
@@ -520,6 +579,281 @@ void DrawTooltip(Graphics& graphics, const RectF& rect, const std::wstring& text
 }
 
 // ---------------------------------------------------------------------------
+// v5.4 overlay rendering: hover feature row, countdown / result pills and the
+// recording activity circle.
+// ---------------------------------------------------------------------------
+RectF LocalRect(const RECT& rect, const RECT& window)
+{
+    return RectF(static_cast<REAL>(rect.left - window.left),
+                 static_cast<REAL>(rect.top - window.top),
+                 static_cast<REAL>(rect.right - rect.left),
+                 static_cast<REAL>(rect.bottom - rect.top));
+}
+
+// Video-camera glyph used by the "会议 / 视频纪要" feature icon. Drawn with GDI+
+// so it scales cleanly with the island DPI.
+void DrawVideoGlyph(Graphics& graphics, const RectF& iconRect, COLORREF color,
+                    BYTE alpha)
+{
+    if (iconRect.Width < 4.0f || iconRect.Height < 4.0f || alpha == 0)
+        return;
+
+    const REAL w = iconRect.Width;
+    const REAL h = iconRect.Height;
+    const REAL bodyWidth = w * 0.60f;
+    const REAL bodyHeight = h * 0.62f;
+    const RectF body(iconRect.X,
+                     iconRect.Y + (h - bodyHeight) / 2.0f - h * 0.02f, bodyWidth,
+                     bodyHeight);
+
+    Pen pen(GdiColor(color, alpha), std::max(1.2f, w * 0.085f));
+    pen.SetLineJoin(LineJoinRound);
+    GraphicsPath* bodyPath = CreateRoundedRectPath(body, bodyHeight * 0.24f);
+    graphics.DrawPath(&pen, bodyPath);
+    delete bodyPath;
+
+    const REAL lensX = body.X + bodyWidth + w * 0.035f;
+    const REAL lensWidth = w * 0.24f;
+    const PointF lensPoints[3] = {PointF(lensX, iconRect.Y + h * 0.31f),
+                                  PointF(lensX + lensWidth, iconRect.Y + h * 0.5f),
+                                  PointF(lensX, iconRect.Y + h * 0.69f)};
+    GraphicsPath lensPath;
+    lensPath.AddPolygon(lensPoints, 3);
+    SolidBrush brush(GdiColor(color, alpha));
+    graphics.FillPath(&brush, &lensPath);
+}
+
+void DrawFeatureRow(Graphics& graphics, const IslandClusterGeometry& geometry,
+                    const ThemePalette& palette, REAL dpiScale, float progress,
+                    int hoveredSlot)
+{
+    if (geometry.featureRow.right <= geometry.featureRow.left || progress <= 0.01f)
+        return;
+
+    const REAL eased = std::max(0.0f, std::min(1.0f, progress));
+    const REAL slide =
+        (1.0f - eased) * static_cast<REAL>(ScaleDip(kFeatureRowShiftDip));
+    RectF rowRect = LocalRect(geometry.featureRow, geometry.window);
+    rowRect.Y += slide;
+    const REAL radius = rowRect.Height / 2.0f;
+    const int opacity = static_cast<int>(std::lround(g_settings.opacity * eased));
+    const BYTE alpha = static_cast<BYTE>(std::lround(255.0 * eased));
+
+    DrawSoftShadow(graphics, rowRect, radius, palette, dpiScale, eased);
+    FillCapsule(graphics, rowRect, radius, palette, opacity);
+    StrokeCapsule(graphics, rowRect, radius, palette, dpiScale, eased);
+
+    for (int i = 0; i < s_featureSlotCount && i < kFeatureSlotCount; ++i)
+    {
+        if (geometry.featureSlots[i].right <= geometry.featureSlots[i].left)
+            continue;
+        RectF slotRect = LocalRect(geometry.featureSlots[i], geometry.window);
+        slotRect.Y += slide;
+
+        if (hoveredSlot == i)
+        {
+            SolidBrush highlight(
+                palette.dark ? Color(static_cast<BYTE>(std::lround(38.0 * eased)),
+                                     255, 255, 255)
+                             : Color(static_cast<BYTE>(std::lround(30.0 * eased)), 0,
+                                     0, 0));
+            GraphicsPath* highlightPath =
+                CreateRoundedRectPath(slotRect, slotRect.Height * 0.32f);
+            graphics.FillPath(&highlight, highlightPath);
+            delete highlightPath;
+        }
+
+        const REAL iconSize = slotRect.Width * 0.58f;
+        const RectF iconRect(slotRect.X + (slotRect.Width - iconSize) / 2.0f,
+                             slotRect.Y + (slotRect.Height - iconSize) / 2.0f,
+                             iconSize, iconSize);
+        DrawVideoGlyph(graphics, iconRect, palette.islandText, alpha);
+    }
+}
+
+void DrawOverlayPill(Graphics& graphics, const RectF& rect,
+                     const std::wstring& text, const ThemePalette& palette,
+                     REAL dpiScale, float progress, bool error)
+{
+    if (rect.Width < 8.0f || rect.Height < 8.0f || text.empty() || progress <= 0.01f)
+        return;
+
+    const REAL eased = std::max(0.0f, std::min(1.0f, progress));
+    const REAL radius = rect.Height / 2.0f;
+    const int opacity = static_cast<int>(std::lround(g_settings.opacity * eased));
+    const BYTE alpha = static_cast<BYTE>(std::lround(255.0 * eased));
+
+    DrawSoftShadow(graphics, rect, radius, palette, dpiScale, eased);
+    FillCapsule(graphics, rect, radius, palette, opacity);
+    StrokeCapsule(graphics, rect, radius, palette, dpiScale, eased);
+
+    // Status dot: red for errors, accent colour otherwise.
+    const COLORREF dotColor = error ? RGB(255, 88, 80) : palette.accent;
+    const REAL dotRadius = rect.Height * 0.115f;
+    const RectF dot(rect.X + rect.Height * 0.42f - dotRadius,
+                    rect.Y + rect.Height / 2.0f - dotRadius, dotRadius * 2.0f,
+                    dotRadius * 2.0f);
+    SolidBrush dotBrush(GdiColor(dotColor, alpha));
+    graphics.FillEllipse(&dotBrush, dot);
+
+    const REAL paddingLeft = rect.Height * 0.80f;
+    RectF textRect(rect.X + paddingLeft, rect.Y,
+                   std::max(1.0f, rect.Width - paddingLeft - rect.Height * 0.36f),
+                   rect.Height);
+    StringFormat format(StringFormat::GenericTypographic());
+    format.SetAlignment(StringAlignmentCenter);
+    format.SetLineAlignment(StringAlignmentCenter);
+    format.SetTrimming(StringTrimmingEllipsisCharacter);
+    format.SetFormatFlags(StringFormatFlagsNoWrap);
+
+    // Shrink the font for long result messages (e.g. the partial-transcription
+    // warning) so they stay readable on one line instead of being clipped.
+    const REAL kFontSizes[] = {11.5f, 10.5f, 9.5f, 9.0f};
+    Font* font = GetFont(
+        std::max(7, static_cast<int>(std::lround(kFontSizes[0] * dpiScale))), false);
+    for (REAL size : kFontSizes)
+    {
+        Font* candidate = GetFont(
+            std::max(7, static_cast<int>(std::lround(size * dpiScale))), false);
+        RectF bounds;
+        graphics.MeasureString(text.c_str(), static_cast<INT>(text.length()),
+                               candidate, textRect, &format, &bounds);
+        font = candidate;
+        if (bounds.Width <= textRect.Width)
+            break;
+    }
+
+    const COLORREF textColor =
+        error ? (palette.dark ? RGB(255, 138, 128) : RGB(190, 40, 40))
+              : palette.islandText;
+    SolidBrush brush(GdiColor(textColor, alpha));
+    graphics.DrawString(text.c_str(), static_cast<INT>(text.length()), font, textRect,
+                        &format, &brush);
+}
+
+void DrawActivityCircle(Graphics& graphics, const RectF& circleRect,
+                        const ThemePalette& palette, REAL dpiScale,
+                        const RecordingActivityVisual& visual, float progress)
+{
+    if (circleRect.Width < 4.0f || progress <= 0.01f)
+        return;
+
+    const REAL eased = std::max(0.0f, std::min(1.0f, progress));
+    const REAL radius = circleRect.Width / 2.0f;
+    const BYTE alpha = static_cast<BYTE>(std::lround(255.0 * eased));
+
+    DrawSoftShadow(graphics, circleRect, radius, palette, dpiScale, eased);
+    FillCapsule(graphics, circleRect, radius, palette,
+                static_cast<int>(std::lround(g_settings.opacity * eased)));
+
+    const BYTE borderAlpha = visual.hovered ? (palette.dark ? 70 : 55)
+                                            : (palette.dark ? 30 : 25);
+    Pen borderPen(GdiColor(palette.islandBorder,
+                           static_cast<BYTE>(std::lround(borderAlpha * eased))),
+                  std::max(1.0f, dpiScale * (visual.hovered ? 1.5f : 1.0f)));
+    graphics.DrawEllipse(&borderPen, circleRect);
+
+    if (!visual.visible || visual.state == RecorderState::Idle)
+        return;
+
+    const REAL centerX = circleRect.X + circleRect.Width / 2.0f;
+    const REAL centerY = circleRect.Y + circleRect.Height / 2.0f;
+    const REAL diameter = circleRect.Width;
+    constexpr REAL kPi = 3.14159265358979f;
+    const COLORREF recordingRed = palette.dark ? RGB(255, 69, 58) : RGB(216, 42, 36);
+
+    switch (visual.state)
+    {
+    case RecorderState::Recording:
+    {
+        const float pulse =
+            0.5f + 0.5f * std::sin(static_cast<float>(visual.pulseTick) * 0.30f);
+        const REAL glowRadius = diameter * (0.235f + 0.045f * pulse);
+        SolidBrush glow(Color(static_cast<BYTE>(std::lround(66.0 * eased)),
+                              GetRValue(recordingRed), GetGValue(recordingRed),
+                              GetBValue(recordingRed)));
+        graphics.FillEllipse(&glow,
+                             RectF(centerX - glowRadius, centerY - glowRadius,
+                                   glowRadius * 2.0f, glowRadius * 2.0f));
+        const REAL dotRadius = diameter * (0.140f + 0.013f * pulse);
+        SolidBrush dot(GdiColor(recordingRed, alpha));
+        graphics.FillEllipse(&dot,
+                             RectF(centerX - dotRadius, centerY - dotRadius,
+                                   dotRadius * 2.0f, dotRadius * 2.0f));
+        break;
+    }
+    case RecorderState::Paused:
+    {
+        const REAL barWidth = diameter * 0.085f;
+        const REAL barHeight = diameter * 0.30f;
+        const REAL gap = diameter * 0.090f;
+        SolidBrush brush(GdiColor(palette.islandText, alpha));
+        RectF leftBar(centerX - gap / 2.0f - barWidth, centerY - barHeight / 2.0f,
+                      barWidth, barHeight);
+        RectF rightBar(centerX + gap / 2.0f, centerY - barHeight / 2.0f, barWidth,
+                       barHeight);
+        GraphicsPath* path = CreateRoundedRectPath(leftBar, barWidth * 0.42f);
+        graphics.FillPath(&brush, path);
+        delete path;
+        path = CreateRoundedRectPath(rightBar, barWidth * 0.42f);
+        graphics.FillPath(&brush, path);
+        delete path;
+        break;
+    }
+    case RecorderState::Stopping:
+    {
+        const REAL spinnerRadius = diameter * 0.27f;
+        const RectF arcRect(centerX - spinnerRadius, centerY - spinnerRadius,
+                            spinnerRadius * 2.0f, spinnerRadius * 2.0f);
+        const REAL startAngle = static_cast<REAL>((visual.pulseTick * 9) % 360);
+        Pen pen(GdiColor(palette.accent, alpha), std::max(1.6f, 2.2f * dpiScale));
+        pen.SetStartCap(LineCapRound);
+        pen.SetEndCap(LineCapRound);
+        graphics.DrawArc(&pen, arcRect, startAngle, 265.0f);
+        break;
+    }
+    case RecorderState::Summarizing:
+    {
+        const REAL outer = diameter * 0.28f;
+        const REAL inner = diameter * 0.10f;
+        const REAL rotation =
+            static_cast<REAL>((visual.pulseTick * 4) % 360) * kPi / 180.0f;
+        PointF points[8] = {};
+        for (int i = 0; i < 8; ++i)
+        {
+            const REAL angle = rotation + static_cast<REAL>(i) * kPi / 4.0f;
+            const REAL r = (i % 2 == 0) ? outer : inner;
+            points[i] = PointF(centerX + std::cos(angle) * r,
+                               centerY + std::sin(angle) * r);
+        }
+        GraphicsPath star;
+        star.AddPolygon(points, 8);
+        SolidBrush brush(GdiColor(palette.accent, alpha));
+        graphics.FillPath(&brush, &star);
+        break;
+    }
+    default:
+        break;
+    }
+
+    // Long-press-to-stop progress ring.
+    if (visual.pressProgress > 0.02f)
+    {
+        const REAL inset = std::max(1.0f, dpiScale * 2.0f);
+        const RectF ringRect(circleRect.X + inset, circleRect.Y + inset,
+                             circleRect.Width - inset * 2.0f,
+                             circleRect.Height - inset * 2.0f);
+        Pen pen(GdiColor(RGB(255, 69, 58),
+                         static_cast<BYTE>(std::lround(225.0 * eased))),
+                std::max(1.5f, 2.2f * dpiScale));
+        pen.SetStartCap(LineCapRound);
+        pen.SetEndCap(LineCapRound);
+        graphics.DrawArc(&pen, ringRect, -90.0f,
+                         360.0f * std::max(0.0f, std::min(1.0f, visual.pressProgress)));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Surface management
 // ---------------------------------------------------------------------------
 bool EnsureSurface(int width, int height)
@@ -687,22 +1021,57 @@ void PaintFrame(const ThemePalette& palette, const std::wstring& clockText,
                       dpiScale, s_hoveredSub == i);
     }
 
+    // v5.4 recording activity circle (right of the message sub-islands).
+    if (geometry.activityCircle.right > geometry.activityCircle.left)
+    {
+        DrawActivityCircle(*s_graphics,
+                           LocalRect(geometry.activityCircle, geometry.window),
+                           palette, dpiScale, s_activity,
+                           GetActivityCircleProgress());
+    }
+
+    // v5.4 hover feature row below the capsule. The countdown / result pill
+    // takes precedence (they share the same slot).
+    const bool overlayPillVisible = !s_countdownText.empty() || !s_toastText.empty();
+    if (s_featureSlotCount > 0 && !overlayPillVisible)
+    {
+        DrawFeatureRow(*s_graphics, geometry, palette, dpiScale,
+                       GetFeatureRowProgress(), s_hoveredFeatureSlot);
+    }
+
     DrawSoftShadow(*s_graphics, capsuleRect, capsuleRadius, palette, dpiScale);
     FillCapsule(*s_graphics, capsuleRect, capsuleRadius, palette, g_settings.opacity);
     StrokeCapsule(*s_graphics, capsuleRect, capsuleRadius, palette, dpiScale);
     DrawClockContent(*s_graphics, capsuleRect, palette, g_settings, dpiScale,
                      clockText);
 
+    // v5.4 countdown / result message pill below the capsule.
+    if (!s_countdownText.empty() && geometry.countdown.right > geometry.countdown.left)
+    {
+        DrawOverlayPill(*s_graphics, LocalRect(geometry.countdown, geometry.window),
+                        s_countdownText, palette, dpiScale, 1.0f, false);
+    }
+    if (!s_toastText.empty() && geometry.toast.right > geometry.toast.left)
+    {
+        DrawOverlayPill(*s_graphics, LocalRect(geometry.toast, geometry.window),
+                        s_toastText, palette, dpiScale, 1.0f, s_toastError);
+    }
+
     if (s_hoveredSub >= 0 && s_hoveredSub < kNotificationSourceCount &&
         geometry.tooltip.right > geometry.tooltip.left)
     {
-        const RectF tooltipRect(
-            static_cast<REAL>(geometry.tooltip.left - geometry.window.left),
-            static_cast<REAL>(geometry.tooltip.top - geometry.window.top),
-            static_cast<REAL>(geometry.tooltip.right - geometry.tooltip.left),
-            static_cast<REAL>(geometry.tooltip.bottom - geometry.tooltip.top));
         const std::wstring text = TooltipTextFor(s_hoveredSub);
-        DrawTooltip(*s_graphics, tooltipRect, text, palette, dpiScale);
+        DrawTooltip(*s_graphics, LocalRect(geometry.tooltip, geometry.window), text,
+                    palette, dpiScale);
+    }
+
+    // v5.4 recording tooltip (elapsed time + hint) follows the activity circle.
+    if (s_activity.visible && s_activity.hovered && !s_activity.tooltip.empty() &&
+        geometry.activityTooltip.right > geometry.activityTooltip.left)
+    {
+        DrawTooltip(*s_graphics,
+                    LocalRect(geometry.activityTooltip, geometry.window),
+                    s_activity.tooltip, palette, dpiScale);
     }
 }
 } // namespace
@@ -734,6 +1103,71 @@ void SetHoveredSubIsland(int sourceIndex)
         return;
     s_hoveredSub = sourceIndex;
     s_hasSignature = false;
+}
+
+// ---------------------------------------------------------------------------
+// v5.4 overlays: hover feature row, countdown / toast pills and the recording
+// activity circle.
+// ---------------------------------------------------------------------------
+void SetFeatureRowInfo(int enabledSlots, int hoveredSlot)
+{
+    const int slots = std::max(0, std::min(kFeatureSlotCount, enabledSlots));
+    const int hovered =
+        (hoveredSlot >= 0 && hoveredSlot < slots) ? hoveredSlot : -1;
+    if (s_featureSlotCount == slots && s_hoveredFeatureSlot == hovered)
+        return;
+    s_featureSlotCount = slots;
+    s_hoveredFeatureSlot = hovered;
+    s_hasSignature = false;
+}
+
+void SetIslandCountdownText(const std::wstring& text)
+{
+    if (s_countdownText == text)
+        return;
+    s_countdownText = text;
+    s_hasSignature = false;
+}
+
+void SetIslandToast(const std::wstring& text, bool error)
+{
+    if (s_toastText == text && s_toastError == error)
+        return;
+    s_toastText = text;
+    s_toastError = error;
+    s_hasSignature = false;
+}
+
+void SetRecordingActivityVisual(const RecordingActivityVisual& visual)
+{
+    s_activity = visual;
+    s_hasActivityVisual = true;
+    s_hasSignature = false;
+}
+
+void GetCurrentIslandOverlays(IslandOverlayState& overlays)
+{
+    overlays.featureSlotCount = s_featureSlotCount;
+    overlays.countdownVisible = !s_countdownText.empty();
+    overlays.toastVisible = !s_toastText.empty();
+    overlays.activityProgress = GetActivityCircleProgress();
+    overlays.activityCircleVisible = s_hasActivityVisual && s_activity.visible;
+    overlays.activityTooltipVisible = s_hasActivityVisual && s_activity.visible &&
+                                      s_activity.hovered &&
+                                      !s_activity.tooltip.empty();
+}
+
+void RenderIslandMaterialRect(Graphics& graphics, const RectF& rect,
+                              float radiusDip, UINT dpi, int opacityPercent)
+{
+    if (rect.Width <= 1.0f || rect.Height <= 1.0f)
+        return;
+    const REAL dpiScale = static_cast<REAL>(dpi == 0 ? 96u : dpi) / 96.0f;
+    const REAL radius = static_cast<REAL>(radiusDip) * dpiScale;
+    const ThemePalette& palette = GetThemePalette();
+    DrawSoftShadow(graphics, rect, radius, palette, dpiScale);
+    FillCapsule(graphics, rect, radius, palette, opacityPercent);
+    StrokeCapsule(graphics, rect, radius, palette, dpiScale);
 }
 
 void RenderIslandPreview(Graphics& graphics, const RectF& bounds, UINT dpi,
@@ -829,9 +1263,12 @@ void RenderIslandFrame(bool force)
             : -1;
     const bool tooltipVisible = hoveredSub >= 0;
 
+    IslandOverlayState overlays;
+    GetCurrentIslandOverlays(overlays);
+
     const IslandClusterGeometry geometry = ComputeIslandClusterGeometry(
         GetIslandHoverProgress(), GetIslandHideProgress(), subProgress,
-        hoveredSub, tooltipVisible);
+        hoveredSub, tooltipVisible, overlays);
     const ThemePalette& palette = GetThemePalette();
     const std::wstring content = FormatDisplayText(g_settings);
 
@@ -855,6 +1292,31 @@ void RenderIslandFrame(bool force)
     signature.hoveredSub = hoveredSub;
     signature.tooltipVisible = tooltipVisible;
     signature.content = content;
+
+    // v5.4 overlays.
+    signature.featureRow = geometry.featureRow;
+    for (int i = 0; i < kFeatureSlotCount; ++i)
+        signature.featureSlots[i] = geometry.featureSlots[i];
+    signature.countdown = geometry.countdown;
+    signature.toast = geometry.toast;
+    signature.activityCircle = geometry.activityCircle;
+    signature.activityTooltip = geometry.activityTooltip;
+    signature.featureSlotCount = s_featureSlotCount;
+    signature.hoveredFeatureSlot = s_hoveredFeatureSlot;
+    signature.featureProgress255 = static_cast<int>(
+        std::lround(GetFeatureRowProgress() * 255.0f));
+    signature.activityProgress255 = static_cast<int>(
+        std::lround(GetActivityCircleProgress() * 255.0f));
+    signature.activityState = static_cast<int>(s_activity.state);
+    signature.activityPulseTick = s_activity.pulseTick;
+    signature.activityPress255 =
+        static_cast<int>(std::lround(s_activity.pressProgress * 255.0f));
+    signature.activityHovered = s_activity.hovered;
+    signature.activityVisible = s_activity.visible;
+    signature.countdownText = s_countdownText;
+    signature.toastText = s_toastText;
+    signature.toastError = s_toastError;
+    signature.activityTooltipText = s_activity.tooltip;
 
     if (!force && s_hasSignature && SignaturesEqual(signature, s_lastSignature))
         return;

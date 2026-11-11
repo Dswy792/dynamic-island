@@ -40,6 +40,30 @@ int ReadInt(HKEY key, const wchar_t* name, int defaultValue)
     return static_cast<int>(value);
 }
 
+std::wstring ReadString(HKEY key, const wchar_t* name,
+                           const std::wstring& defaultValue)
+{
+    DWORD type = 0;
+    DWORD size = 0;
+    if (RegQueryValueExW(key, name, nullptr, &type, nullptr, &size) != ERROR_SUCCESS ||
+        (type != REG_SZ && type != REG_EXPAND_SZ) || size == 0)
+        return defaultValue;
+    std::wstring value(size / sizeof(wchar_t), L'\0');
+    if (RegQueryValueExW(key, name, nullptr, &type,
+                         reinterpret_cast<LPBYTE>(&value[0]), &size) != ERROR_SUCCESS)
+        return defaultValue;
+    while (!value.empty() && value.back() == L'\0')
+        value.pop_back();
+    return value;
+}
+
+void WriteRegString(HKEY key, const wchar_t* name, const std::wstring& value)
+{
+    RegSetValueExW(key, name, 0, REG_SZ,
+                   reinterpret_cast<const BYTE*>(value.c_str()),
+                   static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
+}
+
 void WriteDword(HKEY key, const wchar_t* name, DWORD value)
 {
     RegSetValueExW(key, name, 0, REG_DWORD,
@@ -129,6 +153,16 @@ void LoadSettings()
         settings.notifyPeekSeconds =
             ReadInt(key, L"NotifyPeekSeconds", settings.notifyPeekSeconds);
 
+        settings.recordSaveDir =
+            ReadString(key, L"RecordSaveDir", settings.recordSaveDir);
+        settings.recordAutoSummary =
+            ReadBool(key, L"RecordAutoSummary", settings.recordAutoSummary);
+        settings.aiApiBase = ReadString(key, L"AiApiBase", settings.aiApiBase);
+        settings.aiApiKey = ReadString(key, L"AiApiKey", settings.aiApiKey);
+        settings.aiSttModel = ReadString(key, L"AiSttModel", settings.aiSttModel);
+        settings.aiSummaryModel =
+            ReadString(key, L"AiSummaryModel", settings.aiSummaryModel);
+
         if (version >= 2)
         {
             settings.hideDelaySeconds =
@@ -188,6 +222,12 @@ bool SaveSettings()
     WriteBool(key, L"NotifyWeChat", g_settings.notifyWeChat);
     WriteBool(key, L"NotifyQQ", g_settings.notifyQQ);
     WriteInt(key, L"NotifyPeekSeconds", g_settings.notifyPeekSeconds);
+    WriteRegString(key, L"RecordSaveDir", g_settings.recordSaveDir);
+    WriteBool(key, L"RecordAutoSummary", g_settings.recordAutoSummary);
+    WriteRegString(key, L"AiApiBase", g_settings.aiApiBase);
+    WriteRegString(key, L"AiApiKey", g_settings.aiApiKey);
+    WriteRegString(key, L"AiSttModel", g_settings.aiSttModel);
+    WriteRegString(key, L"AiSummaryModel", g_settings.aiSummaryModel);
 
     // Legacy values are no longer used once the new schema has been written.
     DeleteValue(key, L"HideDelayMinutes");

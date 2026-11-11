@@ -1,10 +1,18 @@
-// Dynamic Island - v5.2 custom-drawn settings window.
+// Dynamic Island - v5.4 custom-drawn settings window.
 //
 // A modeless, fully owner-drawn popup: WS_POPUP + WS_EX_LAYERED |
 // WS_EX_TOOLWINDOW | WS_EX_TOPMOST.  The whole dialog is rendered with GDI+
 // into a persistent 32bpp ARGB surface and presented with UpdateLayeredWindow
 // (the same technique the island itself uses).  GDI+ is initialised once by
 // main(); this file never calls GdiplusStartup/GdiplusShutdown.
+//
+// v5.4 layout: a Windows 11 style left navigation pane with three pages
+//   "时间与外观" - clock/date/appearance/behaviour + live island preview
+//   "微信与 QQ"  - message notification options
+//   "会议与视频纪要" - recording folder, auto-summary and AI endpoint fields
+// The right-hand page is fully custom-painted, including single-line text
+// editors (caret, typing, Backspace/Delete, arrows, Home/End, Ctrl+V/C) for the
+// AI fields because the window has no native child controls.
 //
 // Painting is dirty-rectangle based to keep the window responsive:
 //   * repaint requests are coalesced into one posted WM_APP+100 paint per
@@ -24,9 +32,12 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <gdiplus.h>
+#include <objbase.h>
+#include <shobjidl.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -52,45 +63,62 @@ namespace
 // ---------------------------------------------------------------------------
 constexpr wchar_t kSettingsWindowClass[] = L"DynamicIslandSettingsClass";
 
-constexpr float kWindowWidthDip = 600.0f;
+// v5.4: 900 x 700 DIP window with a Win11-style left navigation pane.
+constexpr float kWindowWidthDip = 900.0f;
+constexpr float kWindowHeightDip = 700.0f;
 constexpr float kShadowDip = 18.0f;
-
-// v5.2: the notification settings card is enabled. The constant is kept so the
-// card can still be hidden in one place if needed; the window height (and
-// therefore the work-area fit logic) follows it.
-constexpr bool kShowNotificationSettings = true;
-
-constexpr float kBaseWindowHeightDip = 630.0f;
-// 12 DIP gap below the columns + 112 DIP notification card + 4 DIP extra
-// footer spacing = 128 DIP.
-constexpr float kNotificationExtraHeightDip = 128.0f;
-constexpr float kWindowHeightDip =
-    kBaseWindowHeightDip +
-    (kShowNotificationSettings ? kNotificationExtraHeightDip : 0.0f);
-
-constexpr float kPanelWidthDip = kWindowWidthDip - kShadowDip * 2.0f; // 564
-constexpr float kPanelHeightDip =
-    kWindowHeightDip - kShadowDip * 2.0f; // 594 (hidden) / 722 (shown)
+constexpr float kPanelWidthDip = kWindowWidthDip - kShadowDip * 2.0f;   // 864
+constexpr float kPanelHeightDip = kWindowHeightDip - kShadowDip * 2.0f; // 664
 constexpr float kPanelRadiusDip = 18.0f;
 constexpr float kCardRadiusDip = 12.0f;
 constexpr float kTitleBarHeightDip = 46.0f;
 constexpr float kContentMarginDip = 18.0f;
+
+// The notification page keeps the v5.2 card; the constant is kept so the card
+// can be disabled in one place if the listener ever has to be turned off.
+constexpr bool kShowNotificationSettings = true;
+
+// --- Left navigation pane --------------------------------------------------
+constexpr float kNavWidthDip = 200.0f;
+constexpr float kNavItemMarginDip = 12.0f;
+constexpr float kNavItemHeightDip = 40.0f;
+constexpr float kNavItemGapDip = 4.0f;
+constexpr float kNavItemsTopDip = 16.0f;
+constexpr int kPageCount = 3;
+
+// --- Right content page ----------------------------------------------------
+constexpr float kContentPaddingDip = 18.0f;
+constexpr float kPageHeaderTopDip =
+    kTitleBarHeightDip + kContentPaddingDip; // 64
+constexpr float kPageHeaderHeightDip = 40.0f;
+constexpr float kPageHeaderGapDip = 8.0f;
+constexpr float kPageContentTopDip =
+    kPageHeaderTopDip + kPageHeaderHeightDip + kPageHeaderGapDip; // 112
+constexpr float kContentLeftDip = kNavWidthDip + kContentPaddingDip; // 218
+constexpr float kPageWidthDip =
+    kPanelWidthDip - kNavWidthDip - 2.0f * kContentPaddingDip; // 628
+
+// --- Footer ----------------------------------------------------------------
+constexpr float kFooterBandHeightDip = 46.0f;
+constexpr float kFooterTopDip = kPanelHeightDip - kFooterBandHeightDip; // 618
+constexpr float kPageContentBottomDip =
+    kFooterTopDip - kContentPaddingDip; // 600
+constexpr float kButtonWidthDip = 88.0f;
+constexpr float kButtonHeightDip = 30.0f;
+constexpr float kButtonGapDip = 10.0f;
+constexpr float kDangerButtonWidthDip = 88.0f;
+constexpr float kFooterHintGapDip = 12.0f;
+constexpr float kCloseButtonSizeDip = 28.0f;
+constexpr float kCloseButtonMarginDip = 14.0f;
+
+// --- Page 1: time & appearance --------------------------------------------
 constexpr float kColumnGapDip = 14.0f;
 constexpr float kColumnWidthDip =
-    (kPanelWidthDip - kContentMarginDip * 2.0f - kColumnGapDip) * 0.5f; // 257
-
-constexpr float kPreviewTopDip = 54.0f;
-constexpr float kPreviewHeightDip = 84.0f;
-constexpr float kCardGapDip = 12.0f;
-constexpr float kContentTopDip =
-    kPreviewTopDip + kPreviewHeightDip + kCardGapDip; // 150
-
-// v5.2: left column cards are taller so that both columns end at the same Y
-// before the full-width notification card (user complaint):
-//   left  = clock 150 + 12 + appearance 236 = 398
-//   right = date  170 + 12 + behavior   216 = 398
-// The extra left-column height is distributed between the rows (row heights and
-// labels are unchanged) so the cards do not end with a large empty bottom.
+    (kPageWidthDip - kColumnGapDip) * 0.5f; // 307
+constexpr float kPreviewHeightDip = 80.0f;
+constexpr float kCardGapDip = 10.0f;
+constexpr float kColumnsTopDip =
+    kPageContentTopDip + kPreviewHeightDip + kCardGapDip; // 202
 constexpr float kClockCardHeightDip = 150.0f;
 constexpr float kAppearanceCardHeightDip = 236.0f;
 constexpr float kClockBottomPaddingDip = 11.0f;
@@ -116,20 +144,13 @@ constexpr float kStepperButtonWidthDip = 30.0f;
 constexpr float kPillGroupWidthDip = 156.0f;
 constexpr float kPillHeightDip = 24.0f;
 constexpr float kSegmentGapDip = 2.0f;
-
-constexpr float kButtonWidthDip = 88.0f;
-constexpr float kButtonHeightDip = 30.0f;
-constexpr float kButtonGapDip = 10.0f;
-constexpr float kFooterBandHeightDip = 46.0f;
-constexpr float kFooterTopDip = kPanelHeightDip - kFooterBandHeightDip; // 548 / 676
 constexpr float kResetRowHeightDip = 20.0f;
 constexpr float kResetButtonWidthDip = 84.0f;
 constexpr float kSystemTimeLinkWidthDip = 96.0f;
 
-// Notification card (full width, appended below the two columns; only used
-// when kShowNotificationSettings is true).
-constexpr float kNotifTopDip = 560.0f; // contentTop(150) + columns(398) + 12
+// --- Page 2: WeChat / QQ notifications ------------------------------------
 constexpr float kNotifCardHeightDip = 112.0f;
+constexpr float kNotifInfoCardHeightDip = 120.0f;
 constexpr float kNotifRowHeightDip = 26.0f;
 constexpr float kNotifRow1TopDip = 30.0f;
 constexpr float kNotifRow2TopDip = 59.0f;
@@ -140,13 +161,21 @@ constexpr float kNotifRow2LabelWidthDip = 70.0f;
 constexpr float kNotifHintGapDip = 12.0f;
 constexpr float kNotifAccessLinkWidthDip = 220.0f;
 
-constexpr float kDangerButtonWidthDip = 88.0f;
-constexpr float kFooterHintGapDip = 12.0f;
-
-constexpr float kCloseButtonSizeDip = 28.0f;
-constexpr float kCloseButtonMarginDip = 14.0f;
+// --- Page 3: meeting / video notes ----------------------------------------
+constexpr float kRecordCardHeightDip = 144.0f;
+// 36 title/row offset + 4 rows (34) + 3 gaps (4 each) + 14 bottom padding.
+constexpr float kAiCardHeightDip = 198.0f;
+constexpr float kPageHintHeightDip = 48.0f;
+constexpr float kRecordLabelWidthDip = 80.0f;
+constexpr float kAiLabelWidthDip = 110.0f;
+constexpr float kAiFieldGapDip = 8.0f;
+constexpr float kAiFieldHeightDip = 30.0f;
+constexpr float kTextFieldTextSizeDip = 11.5f;
+constexpr int kTextFieldCount = 4;
 
 constexpr UINT_PTR kPreviewTimerId = 1;
+constexpr UINT_PTR kCaretTimerId = 2;
+constexpr UINT kCaretBlinkMs = 530;
 constexpr UINT kMsgPaintPending = WM_APP + 100; // posted by RequestPaint()
 constexpr int kMaxWindowWidthPx = 12000;
 constexpr int kMaxWindowHeightPx = 12000;
@@ -166,6 +195,11 @@ enum ControlId
     kIdCancel,
     kIdApply,
     kIdOk,
+
+    // Left navigation (v5.4). Keep these three contiguous: they map to pages.
+    kIdNavTime,
+    kIdNavNotify,
+    kIdNavMeeting,
 
     kIdUse24Hour,
     kIdShowSeconds,
@@ -210,6 +244,16 @@ enum ControlId
     kIdNotifyPeekMinus,
     kIdNotifyPeekPlus,
     kIdNotifyAccess,
+
+    // Meeting / video notes page (v5.4).
+    kIdRecordBrowse,
+    kIdRecordDefault,
+    kIdRecordAutoSummary,
+    // Keep the four AI text fields contiguous: they map to m_pending strings.
+    kIdAiBase,
+    kIdAiKey,
+    kIdAiStt,
+    kIdAiSummary,
 };
 
 // ---------------------------------------------------------------------------
@@ -503,6 +547,15 @@ public:
         m_graphics.FillEllipse(&brush, rect);
     }
 
+    void StrokeEllipse(const RectF& rect, COLORREF color, BYTE alpha = 255,
+                       float widthDip = 1.0f)
+    {
+        if (rect.Width <= 0.0f || rect.Height <= 0.0f)
+            return;
+        Pen pen(GdiColor(color, alpha), std::max(1.0f, widthDip * m_scale));
+        m_graphics.DrawEllipse(&pen, rect);
+    }
+
     void Line(const PointF& from, const PointF& to, COLORREF color, float widthDip)
     {
         Pen pen(GdiColor(color), std::max(1.0f, widthDip * m_scale));
@@ -544,6 +597,14 @@ struct DialogLayout
     RectF panel;
     RectF titleBar;
     RectF closeButton;
+
+    // v5.4 navigation pane and page area.
+    RectF navPane;
+    RectF navItems[3];
+    RectF contentArea;
+    RectF pageHeader;
+
+    // Page 1: time & appearance.
     RectF previewCard;
     RectF clockCard;
     RectF appearanceCard;
@@ -565,13 +626,28 @@ struct DialogLayout
     RectF resetRow;
     RectF systemTimeLink;
 
-    // Notification card (v5.2: enabled).
+    // Page 2: WeChat / QQ notifications.
     RectF notifCard;
     RectF notifRows[3];
     RectF notifStepper;
     RectF notifHint;
     RectF notifToggleSegments[4];
     RectF notifAccessLink;
+    RectF notifInfoCard;
+    RectF notifPageHint;
+
+    // Page 3: meeting / video notes.
+    RectF recordCard;
+    RectF aiCard;
+    RectF pageHint;
+    RectF recordDirRow;
+    RectF recordPathField;
+    RectF recordBrowseButton;
+    RectF recordDefaultButton;
+    RectF autoSummaryRow;
+    RectF recordHint;
+    RectF aiFieldRows[4];
+    RectF aiFieldRects[4];
 
     RectF hint;
     RectF cancelButton;
@@ -640,6 +716,220 @@ RectF NotifToggleSegment(const RectF& row, int index, float gapPx)
     const float width = (row.Width - gapPx * 3.0f) * 0.25f;
     return RectF(row.X + static_cast<float>(index) * (width + gapPx), row.Y,
                  width, row.Height);
+}
+
+// ---------------------------------------------------------------------------
+// v5.4 helpers: default recording folder and AI text-field metadata.
+// ---------------------------------------------------------------------------
+std::wstring DefaultRecordingsDirectory()
+{
+    wchar_t modulePath[MAX_PATH] = {};
+    const DWORD length = GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH)
+        return L"recordings";
+
+    std::wstring path(modulePath, length);
+    const size_t slash = path.find_last_of(L'\\');
+    if (slash != std::wstring::npos)
+        path.resize(slash);
+    path += L"\\recordings";
+    return path;
+}
+
+int TextFieldMaxLength(int index)
+{
+    return index <= 1 ? 512 : 128;
+}
+
+const wchar_t* TextFieldPlaceholder(int index)
+{
+    switch (index)
+    {
+    case 0:
+        return L"https://api.openai.com/v1";
+    case 1:
+        return L"未设置（可选）";
+    case 2:
+        return L"whisper-1";
+    default:
+        return L"gpt-4o-mini";
+    }
+}
+
+std::wstring MaskedText(const std::wstring& text)
+{
+    std::wstring masked;
+    masked.reserve(text.size());
+    for (size_t index = 0; index < text.size(); ++index)
+        masked.push_back(L'\u2022');
+    return masked;
+}
+
+// Width in device pixels of the first count characters of text.
+float PrefixWidth(Painter& painter, const std::wstring& text, int count)
+{
+    if (count <= 0)
+        return 0.0f;
+    const int clamped = std::min(count, static_cast<int>(text.size()));
+    const std::wstring prefix = text.substr(0, static_cast<size_t>(clamped));
+    return painter.MeasureText(prefix, kTextFieldTextSizeDip, false).Width;
+}
+
+// Off-screen text measurement (used for click-to-caret mapping when no paint
+// is in progress). The scratch bitmap is a deliberate process-lifetime leak so
+// nothing touches GDI+ after GdiplusShutdown.
+float MeasureTextWidthStatic(const std::wstring& text, float sizeDip, float scale,
+                             FontCache& fonts)
+{
+    if (text.empty())
+        return 0.0f;
+    static Bitmap* scratchBitmap = nullptr;
+    static Graphics* scratchGraphics = nullptr;
+    if (scratchBitmap == nullptr)
+    {
+        scratchBitmap = new Bitmap(1, 1, PixelFormat32bppARGB);
+        scratchGraphics = new Graphics(scratchBitmap);
+        scratchGraphics->SetTextRenderingHint(TextRenderingHintAntiAlias);
+    }
+
+    Font* font = fonts.Get(std::max(4, RoundToInt(sizeDip * scale)), false);
+    if (font == nullptr)
+        return 0.0f;
+
+    const StringFormat* typographic = StringFormat::GenericTypographic();
+    StringFormat format(typographic);
+    format.SetFormatFlags(static_cast<INT>(StringFormatFlagsNoWrap) |
+                          static_cast<INT>(StringFormatFlagsMeasureTrailingSpaces));
+    RectF bounds;
+    scratchGraphics->MeasureString(text.c_str(), static_cast<INT>(text.size()),
+                                   font, RectF(0.0f, 0.0f, 10000.0f, 1000.0f),
+                                   &format, &bounds);
+    return bounds.Width;
+}
+
+// First character index that must stay visible so the caret fits inside the
+// field (horizontal scrolling for long values).
+int ComputeFieldScrollStart(Painter& painter, const std::wstring& display,
+                            int caret, float availableWidth)
+{
+    int start = 0;
+    const int caretClamped =
+        ClampIntValue(caret, 0, static_cast<int>(display.size()));
+    while (start < caretClamped &&
+           PrefixWidth(painter, display, caretClamped) -
+                   PrefixWidth(painter, display, start) >
+               availableWidth)
+    {
+        ++start;
+    }
+    return start;
+}
+
+void DrawNavIcon(Painter& painter, const RectF& rect, int page, COLORREF color)
+{
+    const float scale = painter.Scale();
+    switch (page)
+    {
+    case 0: // clock
+    {
+        painter.StrokeEllipse(rect, color, 255, 1.4f);
+        const float centerX = rect.X + rect.Width * 0.5f;
+        const float centerY = rect.Y + rect.Height * 0.5f;
+        painter.Line(PointF(centerX, centerY),
+                     PointF(centerX, rect.Y + rect.Height * 0.22f), color, 1.4f);
+        painter.Line(PointF(centerX, centerY),
+                     PointF(rect.X + rect.Width * 0.74f, centerY), color, 1.4f);
+        break;
+    }
+    case 1: // chat bubble
+    {
+        painter.FillRoundRect(RectF(rect.X + 1.0f * scale, rect.Y + 2.0f * scale,
+                                    rect.Width - 2.0f * scale,
+                                    rect.Height - 6.0f * scale),
+                              3.0f * scale, color);
+        painter.Line(PointF(rect.X + rect.Width * 0.30f,
+                            rect.Y + rect.Height - 4.0f * scale),
+                     PointF(rect.X + rect.Width * 0.30f,
+                            rect.Y + rect.Height - 1.0f * scale),
+                     color, 1.4f);
+        break;
+    }
+    default: // waveform bars (meeting notes)
+    {
+        const float left = rect.X + 2.0f * scale;
+        const float baseY = rect.Y + rect.Height - 2.0f * scale;
+        const float heights[4] = {0.35f, 0.70f, 1.0f, 0.55f};
+        for (int index = 0; index < 4; ++index)
+        {
+            const float height = rect.Height * heights[index];
+            painter.FillRoundRect(RectF(left + index * 3.2f * scale,
+                                        baseY - height, 2.0f * scale, height),
+                                  1.0f * scale, color);
+        }
+        break;
+    }
+    }
+}
+
+// Fully custom single-line text editor (the window has no native controls):
+// caret, horizontal scrolling, masking and placeholder support.
+void DrawTextInput(Painter& painter, const RectF& rect, const std::wstring& text,
+                   const wchar_t* placeholder, bool focused, bool masked,
+                   bool caretVisible, int caretPos)
+{
+    if (!painter.Visible(rect))
+        return;
+    const ThemePalette& palette = painter.Palette();
+    const float scale = painter.Scale();
+
+    painter.FillRoundRect(rect, 8.0f * scale, RecessedColor(palette));
+    painter.StrokeRoundRect(rect, 8.0f * scale,
+                            focused ? palette.accent : palette.panelBorder, 255,
+                            focused ? 1.5f : 1.0f);
+
+    const RectF inner = InsetRectF(rect, 10.0f * scale);
+    const bool empty = text.empty();
+    const std::wstring display =
+        empty ? std::wstring() : (masked ? MaskedText(text) : text);
+
+    if (!focused)
+    {
+        painter.Text(empty ? std::wstring(placeholder) : display, inner,
+                     kTextFieldTextSizeDip, false,
+                     empty ? palette.panelTextSecondary : palette.panelText, 255,
+                     StringAlignmentNear, StringAlignmentCenter, true);
+        return;
+    }
+
+    const int caret = ClampIntValue(caretPos, 0, static_cast<int>(display.size()));
+    const int scrollStart =
+        ComputeFieldScrollStart(painter, display, caret, inner.Width);
+    const GraphicsState state = painter.G().Save();
+    painter.G().SetClip(inner, CombineModeReplace);
+    if (empty)
+    {
+        painter.Text(std::wstring(placeholder), inner, kTextFieldTextSizeDip,
+                     false, palette.panelTextSecondary, 255,
+                     StringAlignmentNear, StringAlignmentCenter, true);
+    }
+    else
+    {
+        const std::wstring visible =
+            display.substr(static_cast<size_t>(scrollStart));
+        painter.Text(visible, inner, kTextFieldTextSizeDip, false,
+                     palette.panelText, 255, StringAlignmentNear,
+                     StringAlignmentCenter, false);
+    }
+    if (caretVisible)
+    {
+        const float caretX = inner.X + PrefixWidth(painter, display, caret) -
+                             PrefixWidth(painter, display, scrollStart);
+        const float caretTop = inner.Y + inner.Height * 0.22f;
+        const float caretBottom = inner.Y + inner.Height * 0.78f;
+        painter.Line(PointF(caretX, caretTop), PointF(caretX, caretBottom),
+                     palette.accent, 1.5f);
+    }
+    painter.G().Restore(state);
 }
 
 // ---------------------------------------------------------------------------
@@ -1326,6 +1616,13 @@ private:
 
     void BuildLayout();
     void DrawScene(Painter& painter);
+    void DrawNavigation(Painter& painter);
+    void DrawPageHeader(Painter& painter);
+    void DrawTimeAppearancePage(Painter& painter);
+    void DrawNotificationsPage(Painter& painter);
+    void DrawMeetingPage(Painter& painter);
+    void DrawFooter(Painter& painter);
+    void SetPage(int page);
     void RequestPaint();
     void RequestPaintRect(const RECT& rect);
     void RequestPaintCard(const RectF& card);
@@ -1351,6 +1648,26 @@ private:
     void BeginTitleDrag(POINT screenPoint);
     void UpdateTitleDrag(POINT screenPoint);
 
+    // v5.4 page-3 controls: folder picker + custom single-line text editors.
+    void BrowseRecordDirectory();
+    std::wstring& FieldText(int index);
+    const std::wstring& FieldText(int index) const;
+    void FocusTextFieldAtPoint(int index, POINT point);
+    void UnfocusTextField();
+    void StartCaretTimer();
+    void StopCaretTimer();
+    void HandleTextChar(wchar_t character);
+    bool HandleFocusedFieldKey(WPARAM key);
+    void InsertIntoFocusedField(const std::wstring& text);
+    void BackspaceInFocusedField();
+    void DeleteInFocusedField();
+    void PasteClipboardText();
+    void CopyFocusedFieldText();
+    void RepaintTextField(int index);
+
+    bool IsTextFieldId(int id) const;
+    int TextFieldIndexFromId(int id) const;
+
     int HitTestControl(POINT clientPoint) const;
     bool IsControlEnabled(int id) const;
     bool IsPointOnTitleBar(POINT clientPoint) const;
@@ -1375,6 +1692,12 @@ private:
     bool m_dragging = false;
     POINT m_dragCursorStart = {};
     POINT m_dragWindowStart = {};
+
+    // v5.4 navigation page and custom text-editor state.
+    int m_page = 0;
+    int m_focusField = -1;
+    int m_caretPos[kTextFieldCount] = {0, 0, 0, 0};
+    bool m_caretVisible = true;
 
     // Dirty-rectangle repaint state (device pixels, client coordinates).
     RECT m_dirtyRect = {};
@@ -1425,6 +1748,10 @@ bool SettingsWindow::Create(HWND owner)
     ResetPaintState();
     m_lastPreviewText.clear();
     m_notificationAccess = NotificationAccess::Unknown;
+    m_page = 0;
+    m_focusField = -1;
+    for (int index = 0; index < kTextFieldCount; ++index)
+        m_caretPos[index] = 0;
 
     const UINT dpi = QueryWindowDpi(owner);
     const RECT workArea = WorkAreaForWindow();
@@ -1493,19 +1820,27 @@ void SettingsWindow::OnCreate()
     CenterOnWorkArea();
     m_lastPreviewText = FormatDisplayText(m_pending);
     m_notificationAccess = NotificationAccess::Unknown;
+    m_page = 0;
+    m_focusField = -1;
+    for (int index = 0; index < kTextFieldCount; ++index)
+        m_caretPos[index] = 0;
     SetTimer(m_hwnd, kPreviewTimerId, 1000, nullptr);
 }
 
 void SettingsWindow::OnDestroy()
 {
     if (m_hwnd != nullptr)
+    {
         KillTimer(m_hwnd, kPreviewTimerId);
+        KillTimer(m_hwnd, kCaretTimerId);
+    }
 
     // Clear the interaction state first so that the WM_CAPTURECHANGED sent by
     // ReleaseCapture does not try to repaint the dying window.
     m_dragging = false;
     m_pressedId = kIdNone;
     m_hoverId = kIdNone;
+    m_focusField = -1;
     m_trackingMouse = false;
     if (m_hwnd != nullptr && GetCapture() == m_hwnd)
         ReleaseCapture();
@@ -1705,22 +2040,127 @@ void SettingsWindow::BuildLayout()
         (kTitleBarHeightDip - kCloseButtonSizeDip) * 0.5f, kCloseButtonSizeDip,
         kCloseButtonSizeDip);
 
-    const float leftX = kContentMarginDip;
-    const float rightX = kContentMarginDip + kColumnWidthDip + kColumnGapDip;
+    // --- Left navigation pane + right page area ---------------------------
+    layout.navPane = PanelRect(0.0f, kTitleBarHeightDip, kNavWidthDip,
+                               kFooterTopDip - kTitleBarHeightDip);
+    for (int index = 0; index < kPageCount; ++index)
+    {
+        layout.navItems[index] = PanelRect(
+            kNavItemMarginDip,
+            kTitleBarHeightDip + kNavItemsTopDip +
+                static_cast<float>(index) * (kNavItemHeightDip + kNavItemGapDip),
+            kNavWidthDip - kNavItemMarginDip * 2.0f, kNavItemHeightDip);
+    }
+    layout.contentArea = PanelRect(kNavWidthDip, kTitleBarHeightDip,
+                                   kPanelWidthDip - kNavWidthDip,
+                                   kFooterTopDip - kTitleBarHeightDip);
+    layout.pageHeader = PanelRect(kContentLeftDip, kPageHeaderTopDip,
+                                  kPageWidthDip, kPageHeaderHeightDip);
 
-    layout.previewCard = PanelRect(kContentMarginDip, kPreviewTopDip,
-                                   kPanelWidthDip - kContentMarginDip * 2.0f,
-                                   kPreviewHeightDip);
-    layout.clockCard = PanelRect(leftX, kContentTopDip, kColumnWidthDip,
+    // --- Page 1: live preview + two aligned columns ------------------------
+    const float leftX = kContentLeftDip;
+    const float rightX = kContentLeftDip + kColumnWidthDip + kColumnGapDip;
+    layout.previewCard = PanelRect(kContentLeftDip, kPageContentTopDip,
+                                   kPageWidthDip, kPreviewHeightDip);
+    layout.clockCard = PanelRect(leftX, kColumnsTopDip, kColumnWidthDip,
                                  kClockCardHeightDip);
     layout.appearanceCard =
-        PanelRect(leftX, kContentTopDip + kClockCardHeightDip + kCardGapDip,
+        PanelRect(leftX, kColumnsTopDip + kClockCardHeightDip + kCardGapDip,
                   kColumnWidthDip, kAppearanceCardHeightDip);
-    layout.dateCard = PanelRect(rightX, kContentTopDip, kColumnWidthDip,
+    layout.dateCard = PanelRect(rightX, kColumnsTopDip, kColumnWidthDip,
                                 kDateCardHeightDip);
     layout.behaviorCard =
-        PanelRect(rightX, kContentTopDip + kDateCardHeightDip + kCardGapDip,
+        PanelRect(rightX, kColumnsTopDip + kDateCardHeightDip + kCardGapDip,
                   kColumnWidthDip, kBehaviorCardHeightDip);
+
+    // --- Page 2: notification card + hint below it -------------------------
+    layout.notifCard = PanelRect(kContentLeftDip, kPageContentTopDip,
+                                 kPageWidthDip, kNotifCardHeightDip);
+    layout.notifRows[0] =
+        CardRow(layout.notifCard, kNotifRow1TopDip, kNotifRowHeightDip);
+    layout.notifRows[1] =
+        CardRow(layout.notifCard, kNotifRow2TopDip, kNotifRowHeightDip);
+    layout.notifRows[2] =
+        CardRow(layout.notifCard, kNotifRow3TopDip, kNotifRow3HeightDip);
+    for (int index = 0; index < 4; ++index)
+    {
+        layout.notifToggleSegments[index] =
+            NotifToggleSegment(layout.notifRows[0], index,
+                               kNotifSegmentGapDip * scale);
+    }
+    {
+        const RectF& row2 = layout.notifRows[1];
+        layout.notifStepper = RectF(
+            row2.X + kNotifRow2LabelWidthDip * scale,
+            row2.Y + (row2.Height - kStepperHeightDip * scale) * 0.5f,
+            kStepperWidthDip * scale, kStepperHeightDip * scale);
+        const float hintX = layout.notifStepper.X + layout.notifStepper.Width +
+                            kNotifHintGapDip * scale;
+        layout.notifHint = RectF(hintX, row2.Y, row2.X + row2.Width - hintX,
+                                 row2.Height);
+        layout.notifAccessLink =
+            RectF(layout.notifRows[2].X, layout.notifRows[2].Y,
+                  kNotifAccessLinkWidthDip * scale,
+                  layout.notifRows[2].Height);
+    }
+    layout.notifInfoCard = RectF(
+        layout.notifCard.X,
+        layout.notifCard.Y + layout.notifCard.Height + 16.0f * scale,
+        layout.notifCard.Width, kNotifInfoCardHeightDip * scale);
+    layout.notifPageHint = RectF(
+        layout.notifInfoCard.X,
+        layout.notifInfoCard.Y + layout.notifInfoCard.Height + 12.0f * scale,
+        layout.notifInfoCard.Width, 44.0f * scale);
+
+    // --- Page 3: recording + AI service cards ------------------------------
+    layout.recordCard = PanelRect(kContentLeftDip, kPageContentTopDip,
+                                  kPageWidthDip, kRecordCardHeightDip);
+    layout.aiCard = PanelRect(
+        kContentLeftDip,
+        kPageContentTopDip + kRecordCardHeightDip + kCardGapDip, kPageWidthDip,
+        kAiCardHeightDip);
+    layout.pageHint = PanelRect(
+        kContentLeftDip,
+        kPageContentTopDip + kRecordCardHeightDip + kCardGapDip +
+            kAiCardHeightDip + kCardGapDip,
+        kPageWidthDip, kPageHintHeightDip);
+
+    layout.recordDirRow = CardRow(layout.recordCard, 34.0f, 32.0f);
+    {
+        const float rowRight = layout.recordDirRow.X + layout.recordDirRow.Width;
+        const float buttonWidth = kButtonWidthDip * scale;
+        const float buttonHeight = kButtonHeightDip * scale;
+        const float buttonGap = kButtonGapDip * scale;
+        const float buttonY = layout.recordDirRow.Y +
+                              (layout.recordDirRow.Height - buttonHeight) * 0.5f;
+        layout.recordDefaultButton =
+            RectF(rowRight - buttonWidth, buttonY, buttonWidth, buttonHeight);
+        layout.recordBrowseButton =
+            RectF(rowRight - buttonWidth * 2.0f - buttonGap, buttonY,
+                  buttonWidth, buttonHeight);
+        const float pathX =
+            layout.recordDirRow.X + kRecordLabelWidthDip * scale;
+        layout.recordPathField =
+            RectF(pathX, buttonY, layout.recordBrowseButton.X - buttonGap - pathX,
+                  buttonHeight);
+    }
+    layout.autoSummaryRow = CardRow(layout.recordCard, 76.0f, 30.0f);
+    layout.recordHint = CardRow(layout.recordCard, 112.0f, 18.0f);
+
+    for (int index = 0; index < kTextFieldCount; ++index)
+    {
+        layout.aiFieldRows[index] =
+            CardRow(layout.aiCard,
+                    36.0f + static_cast<float>(index) *
+                                (kAiFieldHeightDip + kAiFieldGapDip),
+                    34.0f);
+        const RectF& row = layout.aiFieldRows[index];
+        layout.aiFieldRects[index] = RectF(
+            row.X + kAiLabelWidthDip * scale,
+            row.Y + (row.Height - kAiFieldHeightDip * scale) * 0.5f,
+            row.Width - kAiLabelWidthDip * scale,
+            kAiFieldHeightDip * scale);
+    }
 
     // The taller left-column cards distribute their extra height between the
     // rows (row heights/labels stay the same), keeping the old bottom padding.
@@ -1785,44 +2225,6 @@ void SettingsWindow::BuildLayout()
         CardRow(layout.behaviorCard, resetTop, kResetRowHeightDip);
     layout.systemTimeLink = SystemTimeLinkRect(layout, scale);
 
-    // Notification card: full width below both columns.
-    if (kShowNotificationSettings)
-    {
-        layout.notifCard = PanelRect(kContentMarginDip, kNotifTopDip,
-                                     kPanelWidthDip - kContentMarginDip * 2.0f,
-                                     kNotifCardHeightDip);
-        layout.notifRows[0] =
-            CardRow(layout.notifCard, kNotifRow1TopDip, kNotifRowHeightDip);
-        layout.notifRows[1] =
-            CardRow(layout.notifCard, kNotifRow2TopDip, kNotifRowHeightDip);
-        layout.notifRows[2] =
-            CardRow(layout.notifCard, kNotifRow3TopDip, kNotifRow3HeightDip);
-        for (int index = 0; index < 4; ++index)
-        {
-            layout.notifToggleSegments[index] =
-                NotifToggleSegment(layout.notifRows[0], index,
-                                   kNotifSegmentGapDip * scale);
-        }
-
-        // Row 2: label + stepper on the left, privacy hint on the right.
-        const RectF& row2 = layout.notifRows[1];
-        layout.notifStepper = RectF(
-            row2.X + kNotifRow2LabelWidthDip * scale,
-            row2.Y + (row2.Height - kStepperHeightDip * scale) * 0.5f,
-            kStepperWidthDip * scale, kStepperHeightDip * scale);
-        const float hintX =
-            layout.notifStepper.X + layout.notifStepper.Width +
-            kNotifHintGapDip * scale;
-        layout.notifHint = RectF(hintX, row2.Y,
-                                 row2.X + row2.Width - hintX, row2.Height);
-
-        // Row 3: notification-access prompt (only shown while not granted).
-        layout.notifAccessLink =
-            RectF(layout.notifRows[2].X, layout.notifRows[2].Y,
-                  kNotifAccessLinkWidthDip * scale,
-                  layout.notifRows[2].Height);
-    }
-
     const float buttonY =
         kFooterTopDip +
         (kPanelHeightDip - kFooterTopDip - kButtonHeightDip) * 0.5f;
@@ -1842,96 +2244,114 @@ void SettingsWindow::BuildLayout()
     layout.hint = PanelRect(hintX, buttonY, cancelX - hintX - kFooterHintGapDip,
                             kButtonHeightDip);
 
-    // -- controls -----------------------------------------------------------
+    // -- controls: footer/nav/close are always interactive, page controls
+    // only for the page that is currently visible --------------------------
     AddControl(kIdClose, layout.closeButton, true);
+    for (int index = 0; index < kPageCount; ++index)
+        AddControl(kIdNavTime + index, layout.navItems[index], true);
 
-    AddControl(kIdUse24Hour, layout.clockRows[0], true);
-    AddControl(kIdShowSeconds, layout.clockRows[1], true);
-    AddControl(kIdShowAmPm, layout.clockRows[2], !m_pending.use24Hour);
-
-    const int themeIds[3] = {kIdThemeDark, kIdThemeLight, kIdThemeSystem};
-    for (int index = 0; index < 3; ++index)
+    if (m_page == 0)
     {
-        AddControl(themeIds[index],
-                   SegmentRectOf(layout.themePills, index, 3,
-                                 kSegmentGapDip * scale),
-                   true);
-    }
+        AddControl(kIdUse24Hour, layout.clockRows[0], true);
+        AddControl(kIdShowSeconds, layout.clockRows[1], true);
+        AddControl(kIdShowAmPm, layout.clockRows[2], !m_pending.use24Hour);
 
-    const int sizeIds[3] = {kIdSizeSmall, kIdSizeMedium, kIdSizeLarge};
-    for (int index = 0; index < 3; ++index)
-    {
-        AddControl(sizeIds[index],
-                   SegmentRectOf(layout.sizePills, index, 3,
-                                 kSegmentGapDip * scale),
-                   true);
-    }
+        const int themeIds[3] = {kIdThemeDark, kIdThemeLight, kIdThemeSystem};
+        for (int index = 0; index < 3; ++index)
+        {
+            AddControl(themeIds[index],
+                       SegmentRectOf(layout.themePills, index, 3,
+                                     kSegmentGapDip * scale),
+                       true);
+        }
 
-    AddControl(kIdFontMinus, StepperPartRect(layout.fontStepper, 0, scale),
-               m_pending.fontSize > kFontSizeMin);
-    AddControl(kIdFontPlus, StepperPartRect(layout.fontStepper, 2, scale),
-               m_pending.fontSize < kFontSizeMax);
-    AddControl(kIdBold, layout.appearanceRows[3], true);
-    AddControl(kIdOpacityMinus, StepperPartRect(layout.opacityStepper, 0, scale),
-               m_pending.opacity > kOpacityMin);
-    AddControl(kIdOpacityPlus, StepperPartRect(layout.opacityStepper, 2, scale),
-               m_pending.opacity < kOpacityMax);
+        const int sizeIds[3] = {kIdSizeSmall, kIdSizeMedium, kIdSizeLarge};
+        for (int index = 0; index < 3; ++index)
+        {
+            AddControl(sizeIds[index],
+                       SegmentRectOf(layout.sizePills, index, 3,
+                                     kSegmentGapDip * scale),
+                       true);
+        }
 
-    AddControl(kIdShowDate, layout.dateRows[0], true);
-    AddControl(kIdShowYear, layout.dateRows[1], true);
-    AddControl(kIdShowWeekday, layout.dateRows[2], true);
+        AddControl(kIdFontMinus, StepperPartRect(layout.fontStepper, 0, scale),
+                   m_pending.fontSize > kFontSizeMin);
+        AddControl(kIdFontPlus, StepperPartRect(layout.fontStepper, 2, scale),
+                   m_pending.fontSize < kFontSizeMax);
+        AddControl(kIdBold, layout.appearanceRows[3], true);
+        AddControl(kIdOpacityMinus,
+                   StepperPartRect(layout.opacityStepper, 0, scale),
+                   m_pending.opacity > kOpacityMin);
+        AddControl(kIdOpacityPlus,
+                   StepperPartRect(layout.opacityStepper, 2, scale),
+                   m_pending.opacity < kOpacityMax);
 
-    const int dateIds[4] = {kIdDateMmdd, kIdDateDdmm, kIdDateYmd, kIdDateCn};
-    for (int index = 0; index < 4; ++index)
-    {
-        AddControl(dateIds[index],
-                   GridPillRect(layout.dateGrid, index,
-                                kDateFormatPillGapDip * scale),
-                   true);
-    }
+        AddControl(kIdShowDate, layout.dateRows[0], true);
+        AddControl(kIdShowYear, layout.dateRows[1], true);
+        AddControl(kIdShowWeekday, layout.dateRows[2], true);
 
-    AddControl(kIdAutoHide, layout.behaviorRows[0], true);
-    AddControl(kIdDelayMinus, StepperPartRect(layout.delayStepper, 0, scale),
-               m_pending.hideDelaySeconds > kHideDelayMinSeconds);
-    AddControl(kIdDelayPlus, StepperPartRect(layout.delayStepper, 2, scale),
-               m_pending.hideDelaySeconds < kHideDelayMaxSeconds);
-    AddControl(kIdHideFullscreen, layout.behaviorRows[2], true);
-    AddControl(kIdAutoStart, layout.behaviorRows[3], true);
-
-    const int positionIds[3] = {kIdPosLeft, kIdPosCenter, kIdPosRight};
-    for (int index = 0; index < 3; ++index)
-    {
-        AddControl(positionIds[index],
-                   SegmentRectOf(layout.positionPills, index, 3,
-                                 kSegmentGapDip * scale),
-                   true);
-    }
-
-    AddControl(kIdResetPosition, ResetButtonRect(layout, scale), true);
-    AddControl(kIdSystemTimeSettings, layout.systemTimeLink, true);
-
-    // Notification card controls (v5.2).
-    if (kShowNotificationSettings)
-    {
-        const int notifToggleIds[4] = {kIdNotifyEnable, kIdNotifyShowContent,
-                                       kIdNotifyWeChat, kIdNotifyQQ};
+        const int dateIds[4] = {kIdDateMmdd, kIdDateDdmm, kIdDateYmd, kIdDateCn};
         for (int index = 0; index < 4; ++index)
         {
-            const bool enabled = (index == 0) || m_pending.notifyEnable;
-            AddControl(notifToggleIds[index],
-                       layout.notifToggleSegments[index], enabled);
+            AddControl(dateIds[index],
+                       GridPillRect(layout.dateGrid, index,
+                                    kDateFormatPillGapDip * scale),
+                       true);
         }
-        const bool peekEnabled = m_pending.notifyEnable;
-        AddControl(kIdNotifyPeekMinus,
-                   StepperPartRect(layout.notifStepper, 0, scale),
-                   peekEnabled &&
-                       m_pending.notifyPeekSeconds > kNotifyPeekSecondsMin);
-        AddControl(kIdNotifyPeekPlus,
-                   StepperPartRect(layout.notifStepper, 2, scale),
-                   peekEnabled &&
-                       m_pending.notifyPeekSeconds < kNotifyPeekSecondsMax);
-        AddControl(kIdNotifyAccess, layout.notifAccessLink,
-                   m_notificationAccess != NotificationAccess::Allowed);
+
+        AddControl(kIdAutoHide, layout.behaviorRows[0], true);
+        AddControl(kIdDelayMinus, StepperPartRect(layout.delayStepper, 0, scale),
+                   m_pending.hideDelaySeconds > kHideDelayMinSeconds);
+        AddControl(kIdDelayPlus, StepperPartRect(layout.delayStepper, 2, scale),
+                   m_pending.hideDelaySeconds < kHideDelayMaxSeconds);
+        AddControl(kIdHideFullscreen, layout.behaviorRows[2], true);
+        AddControl(kIdAutoStart, layout.behaviorRows[3], true);
+
+        const int positionIds[3] = {kIdPosLeft, kIdPosCenter, kIdPosRight};
+        for (int index = 0; index < 3; ++index)
+        {
+            AddControl(positionIds[index],
+                       SegmentRectOf(layout.positionPills, index, 3,
+                                     kSegmentGapDip * scale),
+                       true);
+        }
+
+        AddControl(kIdResetPosition, ResetButtonRect(layout, scale), true);
+        AddControl(kIdSystemTimeSettings, layout.systemTimeLink, true);
+    }
+    else if (m_page == 1)
+    {
+        if (kShowNotificationSettings)
+        {
+            const int notifToggleIds[4] = {kIdNotifyEnable,
+                                           kIdNotifyShowContent,
+                                           kIdNotifyWeChat, kIdNotifyQQ};
+            for (int index = 0; index < 4; ++index)
+            {
+                const bool enabled = (index == 0) || m_pending.notifyEnable;
+                AddControl(notifToggleIds[index],
+                           layout.notifToggleSegments[index], enabled);
+            }
+            const bool peekEnabled = m_pending.notifyEnable;
+            AddControl(kIdNotifyPeekMinus,
+                       StepperPartRect(layout.notifStepper, 0, scale),
+                       peekEnabled &&
+                           m_pending.notifyPeekSeconds > kNotifyPeekSecondsMin);
+            AddControl(kIdNotifyPeekPlus,
+                       StepperPartRect(layout.notifStepper, 2, scale),
+                       peekEnabled &&
+                           m_pending.notifyPeekSeconds < kNotifyPeekSecondsMax);
+            AddControl(kIdNotifyAccess, layout.notifAccessLink,
+                       m_notificationAccess != NotificationAccess::Allowed);
+        }
+    }
+    else
+    {
+        AddControl(kIdRecordBrowse, layout.recordBrowseButton, true);
+        AddControl(kIdRecordDefault, layout.recordDefaultButton, true);
+        AddControl(kIdRecordAutoSummary, layout.autoSummaryRow, true);
+        for (int index = 0; index < kTextFieldCount; ++index)
+            AddControl(kIdAiBase + index, layout.aiFieldRects[index], true);
     }
 
     AddControl(kIdExitApp, layout.exitButton, true);
@@ -1942,12 +2362,116 @@ void SettingsWindow::BuildLayout()
 
 void SettingsWindow::DrawScene(Painter& painter)
 {
+    DrawPanelChrome(painter, m_layout, L"灵动岛设置",
+                    std::wstring(L"Dynamic Island v") + APP_VERSION_STRING);
+    DrawNavigation(painter);
+    DrawPageHeader(painter);
+    switch (m_page)
+    {
+    case 0:
+        DrawTimeAppearancePage(painter);
+        break;
+    case 1:
+        DrawNotificationsPage(painter);
+        break;
+    case 2:
+        DrawMeetingPage(painter);
+        break;
+    default:
+        break;
+    }
+    DrawFooter(painter);
+}
+
+void SettingsWindow::DrawNavigation(Painter& painter)
+{
     const DialogLayout& layout = m_layout;
     const ThemePalette& palette = painter.Palette();
     const float scale = m_scale;
+    if (!painter.Visible(layout.navPane))
+        return;
 
-    DrawPanelChrome(painter, layout, L"灵动岛设置",
-                    std::wstring(L"Dynamic Island v") + APP_VERSION_STRING);
+    // Sidebar background + divider against the page area.
+    painter.FillRoundRect(layout.navPane, 0.0f, palette.panelSurface);
+    painter.Line(PointF(layout.navPane.X + layout.navPane.Width,
+                        layout.navPane.Y),
+                 PointF(layout.navPane.X + layout.navPane.Width,
+                        layout.navPane.Y + layout.navPane.Height),
+                 palette.panelBorder, 1.0f);
+
+    static const wchar_t* const kNavLabels[kPageCount] = {
+        L"时间与外观", L"微信与 QQ", L"会议与视频纪要"};
+    for (int index = 0; index < kPageCount; ++index)
+    {
+        const RectF& item = layout.navItems[index];
+        if (!painter.Visible(item))
+            continue;
+
+        const bool selected = (index == m_page);
+        const bool hovered = painter.Hovered(kIdNavTime + index);
+        COLORREF fill = palette.panelSurface;
+        if (selected)
+            fill = BlendColor(palette.panelSurfaceHover, palette.accent, 30);
+        else if (hovered)
+            fill = palette.panelSurfaceHover;
+        painter.FillRoundRect(item, 8.0f * scale, fill);
+
+        if (selected)
+        {
+            painter.FillRoundRect(
+                RectF(item.X + 3.0f * scale,
+                      item.Y + (item.Height - 18.0f * scale) * 0.5f,
+                      3.0f * scale, 18.0f * scale),
+                1.5f * scale, palette.accent);
+        }
+
+        const COLORREF contentColor =
+            selected ? palette.panelText : palette.panelTextSecondary;
+        DrawNavIcon(painter,
+                    RectF(item.X + 16.0f * scale,
+                          item.Y + (item.Height - 16.0f * scale) * 0.5f,
+                          16.0f * scale, 16.0f * scale),
+                    index, contentColor);
+        painter.Text(kNavLabels[index],
+                     RectF(item.X + 40.0f * scale, item.Y,
+                           item.Width - 48.0f * scale, item.Height),
+                     12.5f, selected, contentColor, 255, StringAlignmentNear,
+                     StringAlignmentCenter, true);
+    }
+}
+
+void SettingsWindow::DrawPageHeader(Painter& painter)
+{
+    const DialogLayout& layout = m_layout;
+    const ThemePalette& palette = painter.Palette();
+    const float scale = m_scale;
+    if (!painter.Visible(layout.pageHeader))
+        return;
+
+    static const wchar_t* const kTitles[kPageCount] = {
+        L"时间与外观", L"微信与 QQ", L"会议与视频纪要"};
+    static const wchar_t* const kSubtitles[kPageCount] = {
+        L"时钟、日期、外观与行为",
+        L"消息提醒、显示内容与子岛停留时长",
+        L"系统音频实时转写与 AI 纪要（OpenAI 兼容接口）"};
+    const int page = ClampIntValue(m_page, 0, kPageCount - 1);
+    painter.Text(kTitles[page],
+                 RectF(layout.pageHeader.X, layout.pageHeader.Y,
+                       layout.pageHeader.Width, 24.0f * scale),
+                 18.0f, true, palette.panelText, 255, StringAlignmentNear,
+                 StringAlignmentCenter, true);
+    painter.Text(kSubtitles[page],
+                 RectF(layout.pageHeader.X, layout.pageHeader.Y + 22.0f * scale,
+                       layout.pageHeader.Width, 16.0f * scale),
+                 10.0f, false, palette.panelTextSecondary, 255,
+                 StringAlignmentNear, StringAlignmentCenter, true);
+}
+
+void SettingsWindow::DrawTimeAppearancePage(Painter& painter)
+{
+    const DialogLayout& layout = m_layout;
+    const ThemePalette& palette = painter.Palette();
+    const float scale = m_scale;
 
     // Live island preview: drawn by the shared renderer (rendering.h) so the
     // capsule is pixel-identical to the real one - same shadow, gradient,
@@ -1968,8 +2492,7 @@ void SettingsWindow::DrawScene(Painter& painter)
         if (painter.Visible(previewBounds))
         {
             // At normal DPI m_scale == dpi/96, so this is exactly m_dpi; on
-            // fit-shrunk windows (very small screens) the preview shrinks with
-            // the rest of the layout instead of overflowing the card.
+            // fit-shrunk windows the preview shrinks with the layout.
             const UINT previewDpi =
                 static_cast<UINT>(std::lround(96.0f * m_scale));
             const GraphicsState clipState = painter.G().Save();
@@ -2070,12 +2593,122 @@ void SettingsWindow::DrawScene(Painter& painter)
     DrawTextLink(painter, ResetButtonRect(layout, scale), L"重置位置",
                  painter.Hovered(kIdResetPosition),
                  painter.Pressed(kIdResetPosition));
+}
 
-    // v5.2 full-width notification card.
+void SettingsWindow::DrawNotificationsPage(Painter& painter)
+{
+    const DialogLayout& layout = m_layout;
+    const ThemePalette& palette = painter.Palette();
+
     if (kShowNotificationSettings)
         DrawNotificationCard(painter, layout, m_pending, m_notificationAccess);
 
-    // Footer: danger exit button on the left, hint, then Cancel/Apply/OK.
+    // Sub-island behaviour summary (fills the page and explains the sources).
+    DrawCard(painter, layout.notifInfoCard, L"子岛与提示");
+    {
+        const float scale = painter.Scale();
+        const RectF card = layout.notifInfoCard;
+        const float lineX = card.X + 12.0f * scale;
+        const float lineWidth = card.Width - 24.0f * scale;
+        static const wchar_t* const kLines[3] = {
+            L"微信：通过 Windows UI Automation 读取聊天列表，不注入、不读内存。",
+            L"QQ：通过 Windows 系统通知接口读取新消息。",
+            L"点击子岛打开对应聊天窗口；悬停可查看发送者与消息内容。"};
+        for (int index = 0; index < 3; ++index)
+        {
+            painter.Text(kLines[index],
+                         RectF(lineX, card.Y + (38.0f + index * 24.0f) * scale,
+                               lineWidth, 22.0f * scale),
+                         10.5f, false, palette.panelTextSecondary, 255,
+                         StringAlignmentNear, StringAlignmentCenter, true);
+        }
+    }
+
+    const RectF& hint = layout.notifPageHint;
+    painter.Text(L"消息提醒会以圆形子岛显示在胶囊旁边；点击子岛可打开对应聊天窗口。",
+                 RectF(hint.X, hint.Y, hint.Width, hint.Height * 0.5f), 9.5f,
+                 false, palette.panelTextSecondary, 255, StringAlignmentNear,
+                 StringAlignmentCenter, true);
+    painter.Text(L"「显示内容」控制悬停提示里是否显示消息正文；停留时长 0 表示常驻。",
+                 RectF(hint.X, hint.Y + hint.Height * 0.5f, hint.Width,
+                       hint.Height * 0.5f),
+                 9.5f, false, palette.panelTextSecondary, 255,
+                 StringAlignmentNear, StringAlignmentCenter, true);
+}
+
+void SettingsWindow::DrawMeetingPage(Painter& painter)
+{
+    const DialogLayout& layout = m_layout;
+    const ThemePalette& palette = painter.Palette();
+    const float scale = m_scale;
+
+    // --- Recording & saving card -----------------------------------------
+    DrawCard(painter, layout.recordCard, L"录制与保存");
+    painter.Text(L"保存目录",
+                 RectF(layout.recordDirRow.X, layout.recordDirRow.Y,
+                       kRecordLabelWidthDip * scale,
+                       layout.recordDirRow.Height),
+                 12.0f, false, palette.panelText);
+    const std::wstring displayPath = m_pending.recordSaveDir.empty()
+                                         ? DefaultRecordingsDirectory()
+                                         : m_pending.recordSaveDir;
+    painter.FillRoundRect(layout.recordPathField, 8.0f * scale,
+                          RecessedColor(palette));
+    painter.StrokeRoundRect(layout.recordPathField, 8.0f * scale,
+                            palette.panelBorder, 255, 1.0f);
+    painter.Text(displayPath, InsetRectF(layout.recordPathField, 10.0f * scale),
+                 11.0f, false,
+                 m_pending.recordSaveDir.empty() ? palette.panelTextSecondary
+                                                 : palette.panelText,
+                 255, StringAlignmentNear, StringAlignmentCenter, true);
+    DrawButton(painter, layout.recordBrowseButton, L"浏览...", false,
+               painter.Hovered(kIdRecordBrowse),
+               painter.Pressed(kIdRecordBrowse));
+    DrawButton(painter, layout.recordDefaultButton, L"使用默认", false,
+               painter.Hovered(kIdRecordDefault),
+               painter.Pressed(kIdRecordDefault));
+    DrawToggleRow(painter, layout.autoSummaryRow, L"录制结束后自动生成 AI 纪要",
+                  m_pending.recordAutoSummary, true, kIdRecordAutoSummary);
+    painter.Text(
+        L"录音仅用于实时 AI 转写，不保存音频文件；结果以 Markdown + TXT 保存到上述目录。",
+        layout.recordHint, 9.0f, false, palette.panelTextSecondary, 255,
+        StringAlignmentNear, StringAlignmentCenter, true);
+
+    // --- AI service card ---------------------------------------------------
+    DrawCard(painter, layout.aiCard, L"AI 服务");
+    static const wchar_t* const kFieldLabels[kTextFieldCount] = {
+        L"API 地址", L"API Key", L"语音识别模型", L"摘要模型"};
+    for (int index = 0; index < kTextFieldCount; ++index)
+    {
+        const RectF& row = layout.aiFieldRows[index];
+        painter.Text(kFieldLabels[index],
+                     RectF(row.X, row.Y, kAiLabelWidthDip * scale, row.Height),
+                     12.0f, false, palette.panelText);
+        DrawTextInput(painter, layout.aiFieldRects[index], FieldText(index),
+                      TextFieldPlaceholder(index), m_focusField == index,
+                      index == 1, m_caretVisible, m_caretPos[index]);
+    }
+
+    // --- Hint lines under the cards ---------------------------------------
+    painter.Text(
+        L"录音仅用于实时 AI 转写，不保存音频文件；结果保存为文字纪要（Markdown + TXT）。",
+        RectF(layout.pageHint.X, layout.pageHint.Y, layout.pageHint.Width,
+              layout.pageHint.Height * 0.5f),
+        9.5f, false, palette.panelTextSecondary, 255, StringAlignmentNear,
+        StringAlignmentCenter, true);
+    painter.Text(L"未配置 AI 接口 / API Key 时无法开始记录；API Key 仅保存在本机注册表。",
+                 RectF(layout.pageHint.X,
+                       layout.pageHint.Y + layout.pageHint.Height * 0.5f,
+                       layout.pageHint.Width, layout.pageHint.Height * 0.5f),
+                 9.5f, false, palette.panelTextSecondary, 255,
+                 StringAlignmentNear, StringAlignmentCenter, true);
+}
+
+void SettingsWindow::DrawFooter(Painter& painter)
+{
+    const DialogLayout& layout = m_layout;
+    const ThemePalette& palette = painter.Palette();
+
     DrawDangerButton(painter, layout.exitButton, L"退出程序",
                      painter.Hovered(kIdExitApp), painter.Pressed(kIdExitApp));
     painter.Text(L"Enter 确定 · Esc 取消", layout.hint, 9.5f, false,
@@ -2169,6 +2802,13 @@ void SettingsWindow::RepaintControl(int id)
 // control affects it) instead of repainting the whole window.
 void SettingsWindow::RepaintAfterAction(int id)
 {
+    // Custom text editors only repaint their own field.
+    if (IsTextFieldId(id))
+    {
+        RepaintControl(id);
+        return;
+    }
+
     const Control* control = FindControl(id);
     if (control == nullptr)
     {
@@ -2189,6 +2829,8 @@ void SettingsWindow::RepaintAfterAction(int id)
         {&m_layout.dateCard, true},
         {&m_layout.behaviorCard, false},
         {&m_layout.notifCard, false},
+        {&m_layout.recordCard, false},
+        {&m_layout.aiCard, false},
     };
     for (const CardEntry& entry : cards)
     {
@@ -2388,15 +3030,19 @@ void SettingsWindow::OnTimerTick()
     if (m_hwnd == nullptr || m_dragging)
         return;
 
-    // Preview clock: repaint the preview card only when the text changed.
+    // Preview clock: repaint the preview card only when the text changed and
+    // only while page 1 is visible.
     const std::wstring previewText = FormatDisplayText(m_pending);
     if (previewText != m_lastPreviewText)
     {
         m_lastPreviewText = previewText;
-        if (m_layout.controls.empty())
-            RequestPaint();
-        else
-            RequestPaintCard(m_layout.previewCard);
+        if (m_page == 0)
+        {
+            if (m_layout.controls.empty())
+                RequestPaint();
+            else
+                RequestPaintCard(m_layout.previewCard);
+        }
     }
 
     // Notification access can change while the dialog is open (the user grants
@@ -2407,10 +3053,13 @@ void SettingsWindow::OnTimerTick()
         if (access != m_notificationAccess)
         {
             m_notificationAccess = access;
-            if (m_layout.controls.empty())
-                RequestPaint();
-            else
-                RequestPaintCard(m_layout.notifCard);
+            if (m_page == 1)
+            {
+                if (m_layout.controls.empty())
+                    RequestPaint();
+                else
+                    RequestPaintCard(m_layout.notifCard);
+            }
         }
     }
 }
@@ -2477,6 +3126,11 @@ void SettingsWindow::UpdateCursorForPoint(POINT point)
     }
 
     const int hit = HitTestControl(point);
+    if (IsTextFieldId(hit))
+    {
+        SetCursor(LoadCursorW(nullptr, IDC_IBEAM));
+        return;
+    }
     if (hit != kIdNone && IsControlEnabled(hit))
     {
         SetCursor(LoadCursorW(nullptr, IDC_HAND));
@@ -2531,6 +3185,19 @@ void SettingsWindow::OnLButtonDown(POINT point)
     SetFocus(m_hwnd);
 
     const int hit = HitTestControl(point);
+
+    // Custom text editors: focus the clicked field and place the caret. They
+    // do not use the pressed/capture path (they stay focused after mouse-up).
+    if (IsTextFieldId(hit))
+    {
+        FocusTextFieldAtPoint(TextFieldIndexFromId(hit), point);
+        return;
+    }
+
+    // Clicking anywhere else commits the current edit.
+    if (m_focusField >= 0)
+        UnfocusTextField();
+
     if (hit != kIdNone)
     {
         if (!IsControlEnabled(hit))
@@ -2794,6 +3461,36 @@ void SettingsWindow::PerformAction(int id)
             RequestNotificationAccessFromUi();
         return;
 
+    // --- v5.4 navigation + meeting page --------------------------------
+    case kIdNavTime:
+        SetPage(0);
+        return;
+    case kIdNavNotify:
+        SetPage(1);
+        return;
+    case kIdNavMeeting:
+        SetPage(2);
+        return;
+
+    case kIdRecordBrowse:
+        BrowseRecordDirectory();
+        return;
+    case kIdRecordDefault:
+        RepaintControl(kIdRecordDefault); // drop the pressed state
+        m_pending.recordSaveDir.clear();
+        RequestPaintRect(ToPixelRect(m_layout.recordCard));
+        return;
+    case kIdRecordAutoSummary:
+        m_pending.recordAutoSummary = !m_pending.recordAutoSummary;
+        break;
+    case kIdAiBase:
+    case kIdAiKey:
+    case kIdAiStt:
+    case kIdAiSummary:
+        // Text fields are focused by the mouse-down handler; nothing to do on
+        // mouse-up (keeps the caret where the user clicked).
+        return;
+
     default:
         return;
     }
@@ -2801,6 +3498,387 @@ void SettingsWindow::PerformAction(int id)
     // Repaint only the owning card (and the preview when relevant) instead of
     // the whole window.
     RepaintAfterAction(id);
+}
+
+// ---------------------------------------------------------------------------
+// v5.4: page switching, folder picker and custom single-line text editors
+// ---------------------------------------------------------------------------
+void SettingsWindow::SetPage(int page)
+{
+    if (page < 0 || page >= kPageCount || page == m_page)
+        return;
+
+    UnfocusTextField();
+    m_page = page;
+    if (page == 1)
+        m_notificationAccess = GetNotificationAccessStatus();
+
+    // Repaint the page area and the navigation selection.
+    RECT content = ToPixelRect(m_layout.contentArea);
+    InflateRect(&content, kDirtyMarginPx, kDirtyMarginPx);
+    RequestPaintRect(content);
+    for (int index = 0; index < kPageCount; ++index)
+        RepaintControl(kIdNavTime + index);
+}
+
+bool SettingsWindow::IsTextFieldId(int id) const
+{
+    return id >= kIdAiBase && id <= kIdAiSummary;
+}
+
+int SettingsWindow::TextFieldIndexFromId(int id) const
+{
+    return IsTextFieldId(id) ? id - kIdAiBase : -1;
+}
+
+std::wstring& SettingsWindow::FieldText(int index)
+{
+    switch (index)
+    {
+    case 0:
+        return m_pending.aiApiBase;
+    case 1:
+        return m_pending.aiApiKey;
+    case 2:
+        return m_pending.aiSttModel;
+    default:
+        return m_pending.aiSummaryModel;
+    }
+}
+
+const std::wstring& SettingsWindow::FieldText(int index) const
+{
+    switch (index)
+    {
+    case 0:
+        return m_pending.aiApiBase;
+    case 1:
+        return m_pending.aiApiKey;
+    case 2:
+        return m_pending.aiSttModel;
+    default:
+        return m_pending.aiSummaryModel;
+    }
+}
+
+void SettingsWindow::StartCaretTimer()
+{
+    m_caretVisible = true;
+    if (m_hwnd != nullptr)
+        SetTimer(m_hwnd, kCaretTimerId, kCaretBlinkMs, nullptr);
+}
+
+void SettingsWindow::StopCaretTimer()
+{
+    if (m_hwnd != nullptr)
+        KillTimer(m_hwnd, kCaretTimerId);
+}
+
+void SettingsWindow::RepaintTextField(int index)
+{
+    if (index < 0 || index >= kTextFieldCount)
+        return;
+    RepaintControl(kIdAiBase + index);
+}
+
+void SettingsWindow::UnfocusTextField()
+{
+    if (m_focusField < 0)
+        return;
+    const int field = m_focusField;
+    m_focusField = -1;
+    StopCaretTimer();
+    RepaintTextField(field);
+}
+
+void SettingsWindow::FocusTextFieldAtPoint(int index, POINT point)
+{
+    if (index < 0 || index >= kTextFieldCount)
+        return;
+    const Control* control = FindControl(kIdAiBase + index);
+    if (control == nullptr)
+        return;
+
+    if (m_focusField >= 0 && m_focusField != index)
+        RepaintTextField(m_focusField);
+    m_focusField = index;
+    StartCaretTimer();
+
+    // Caret placement: nearest character boundary to the click, taking the
+    // field's horizontal scroll into account (same rule as DrawTextInput).
+    const std::wstring& text = FieldText(index);
+    const std::wstring display = index == 1 ? MaskedText(text) : text;
+    const float scale = m_scale;
+    const int innerLeft = control->rect.left + RoundToInt(10.0f * scale);
+    const float available =
+        static_cast<float>(control->rect.right - control->rect.left) -
+        20.0f * scale;
+    const auto prefixWidth = [&](int count) {
+        return MeasureTextWidthStatic(
+            display.substr(0, static_cast<size_t>(std::max(0, count))),
+            kTextFieldTextSizeDip, scale, m_fonts);
+    };
+
+    const int displayLength = static_cast<int>(display.size());
+    const int currentCaret =
+        ClampIntValue(m_caretPos[index], 0, displayLength);
+    int scrollStart = 0;
+    while (scrollStart < currentCaret &&
+           prefixWidth(currentCaret) - prefixWidth(scrollStart) > available)
+    {
+        ++scrollStart;
+    }
+
+    int bestIndex = scrollStart;
+    float bestDistance = 1.0e30f;
+    for (int candidate = scrollStart; candidate <= displayLength; ++candidate)
+    {
+        const float candidateX =
+            static_cast<float>(innerLeft) + prefixWidth(candidate) -
+            prefixWidth(scrollStart);
+        const float distance =
+            std::fabs(static_cast<float>(point.x) - candidateX);
+        if (distance < bestDistance)
+        {
+            bestDistance = distance;
+            bestIndex = candidate;
+        }
+    }
+
+    m_caretPos[index] = ClampIntValue(bestIndex, 0, static_cast<int>(text.size()));
+    RepaintTextField(index);
+}
+
+void SettingsWindow::InsertIntoFocusedField(const std::wstring& text)
+{
+    if (m_focusField < 0)
+        return;
+    std::wstring& target = FieldText(m_focusField);
+    const int maxLength = TextFieldMaxLength(m_focusField);
+    const int room = maxLength - static_cast<int>(target.size());
+    if (room <= 0)
+        return;
+
+    std::wstring insertion = text;
+    if (static_cast<int>(insertion.size()) > room)
+        insertion.resize(static_cast<size_t>(room));
+
+    int caret = ClampIntValue(m_caretPos[m_focusField], 0,
+                              static_cast<int>(target.size()));
+    target.insert(target.begin() + caret, insertion.begin(), insertion.end());
+    m_caretPos[m_focusField] = caret + static_cast<int>(insertion.size());
+    StartCaretTimer();
+    RepaintTextField(m_focusField);
+}
+
+void SettingsWindow::BackspaceInFocusedField()
+{
+    if (m_focusField < 0)
+        return;
+    std::wstring& target = FieldText(m_focusField);
+    int caret = ClampIntValue(m_caretPos[m_focusField], 0,
+                              static_cast<int>(target.size()));
+    if (caret <= 0)
+        return;
+    target.erase(target.begin() + (caret - 1));
+    m_caretPos[m_focusField] = caret - 1;
+    StartCaretTimer();
+    RepaintTextField(m_focusField);
+}
+
+void SettingsWindow::DeleteInFocusedField()
+{
+    if (m_focusField < 0)
+        return;
+    std::wstring& target = FieldText(m_focusField);
+    const int caret = ClampIntValue(m_caretPos[m_focusField], 0,
+                                    static_cast<int>(target.size()));
+    if (caret >= static_cast<int>(target.size()))
+        return;
+    target.erase(target.begin() + caret);
+    StartCaretTimer();
+    RepaintTextField(m_focusField);
+}
+
+void SettingsWindow::PasteClipboardText()
+{
+    if (m_focusField < 0)
+        return;
+    if (!OpenClipboard(m_hwnd))
+        return;
+
+    std::wstring pasted;
+    HANDLE handle = GetClipboardData(CF_UNICODETEXT);
+    if (handle != nullptr)
+    {
+        const wchar_t* data = static_cast<const wchar_t*>(GlobalLock(handle));
+        if (data != nullptr)
+        {
+            pasted = data;
+            GlobalUnlock(handle);
+        }
+    }
+    CloseClipboard();
+
+    // Single-line field: drop line breaks and tabs.
+    std::wstring cleaned;
+    cleaned.reserve(pasted.size());
+    for (size_t index = 0; index < pasted.size(); ++index)
+    {
+        const wchar_t character = pasted[index];
+        if (character != L'\r' && character != L'\n' && character != L'\t')
+            cleaned.push_back(character);
+    }
+    if (!cleaned.empty())
+        InsertIntoFocusedField(cleaned);
+}
+
+void SettingsWindow::CopyFocusedFieldText()
+{
+    if (m_focusField < 0)
+        return;
+    const std::wstring& text = FieldText(m_focusField);
+    if (text.empty())
+        return;
+    if (!OpenClipboard(m_hwnd))
+        return;
+    EmptyClipboard();
+    const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (memory != nullptr)
+    {
+        void* destination = GlobalLock(memory);
+        if (destination != nullptr)
+        {
+            std::memcpy(destination, text.c_str(), bytes);
+            GlobalUnlock(memory);
+            SetClipboardData(CF_UNICODETEXT, memory);
+        }
+        else
+        {
+            GlobalFree(memory);
+        }
+    }
+    CloseClipboard();
+}
+
+void SettingsWindow::HandleTextChar(wchar_t character)
+{
+    if (m_focusField < 0 || character < 32 || character == 127)
+        return;
+    InsertIntoFocusedField(std::wstring(1, character));
+}
+
+bool SettingsWindow::HandleFocusedFieldKey(WPARAM key)
+{
+    if (m_focusField < 0)
+        return false;
+
+    const bool controlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    switch (key)
+    {
+    case VK_ESCAPE:
+    case VK_RETURN:
+        UnfocusTextField();
+        return true;
+
+    case VK_LEFT:
+        m_caretPos[m_focusField] = std::max(0, m_caretPos[m_focusField] - 1);
+        StartCaretTimer();
+        RepaintTextField(m_focusField);
+        return true;
+
+    case VK_RIGHT:
+        m_caretPos[m_focusField] =
+            std::min(static_cast<int>(FieldText(m_focusField).size()),
+                     m_caretPos[m_focusField] + 1);
+        StartCaretTimer();
+        RepaintTextField(m_focusField);
+        return true;
+
+    case VK_HOME:
+        m_caretPos[m_focusField] = 0;
+        StartCaretTimer();
+        RepaintTextField(m_focusField);
+        return true;
+
+    case VK_END:
+        m_caretPos[m_focusField] =
+            static_cast<int>(FieldText(m_focusField).size());
+        StartCaretTimer();
+        RepaintTextField(m_focusField);
+        return true;
+
+    case VK_BACK:
+        BackspaceInFocusedField();
+        return true;
+
+    case VK_DELETE:
+        DeleteInFocusedField();
+        return true;
+
+    default:
+        break;
+    }
+
+    if (controlDown && (key == L'V' || key == L'v'))
+    {
+        PasteClipboardText();
+        return true;
+    }
+    if (controlDown && (key == L'C' || key == L'c'))
+    {
+        CopyFocusedFieldText();
+        return true;
+    }
+    return false;
+}
+
+void SettingsWindow::BrowseRecordDirectory()
+{
+    if (m_hwnd == nullptr)
+        return;
+
+    RepaintControl(kIdRecordBrowse); // drop the pressed state
+
+    // CLSID_FileOpenDialog, declared locally so no uuid.lib is required.
+    static const CLSID kFileOpenDialogClsid = {
+        0xDC1C5A9C, 0xE88A, 0x4DDE, {0xA5, 0xA1, 0x60, 0xF8, 0x2A, 0x20, 0xAE, 0xF7}};
+    IFileDialog* dialog = nullptr;
+    if (FAILED(CoCreateInstance(kFileOpenDialogClsid, nullptr,
+                                CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog))) ||
+        dialog == nullptr)
+    {
+        return;
+    }
+
+    DWORD options = 0;
+    if (SUCCEEDED(dialog->GetOptions(&options)))
+    {
+        dialog->SetOptions(static_cast<FILEOPENDIALOGOPTIONS>(
+            options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM |
+            FOS_PATHMUSTEXIST));
+    }
+    dialog->SetTitle(L"选择录制保存目录");
+
+    if (SUCCEEDED(dialog->Show(m_hwnd)))
+    {
+        IShellItem* item = nullptr;
+        if (SUCCEEDED(dialog->GetResult(&item)) && item != nullptr)
+        {
+            PWSTR path = nullptr;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) &&
+                path != nullptr)
+            {
+                m_pending.recordSaveDir = path;
+                CoTaskMemFree(path);
+            }
+            item->Release();
+        }
+    }
+    dialog->Release();
+
+    RequestPaintRect(ToPixelRect(m_layout.recordCard));
 }
 
 LRESULT CALLBACK SettingsWindow::WindowProc(HWND hwnd, UINT message,
@@ -2859,15 +3937,37 @@ LRESULT SettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam
     case WM_MOUSEACTIVATE:
         return MA_ACTIVATE;
 
+    case WM_ACTIVATE:
+        // Leaving the window commits the current text edit (standard dialog
+        // behaviour) and stops the caret blink timer.
+        if (LOWORD(wParam) == WA_INACTIVE && m_focusField >= 0)
+            UnfocusTextField();
+        return 0;
+
     case WM_TIMER:
         if (wParam == kPreviewTimerId)
+        {
             OnTimerTick();
+        }
+        else if (wParam == kCaretTimerId && m_focusField >= 0)
+        {
+            m_caretVisible = !m_caretVisible;
+            RepaintTextField(m_focusField);
+        }
         return 0;
 
     case kMsgPaintPending:
         // Coalesced paint request: one repaint per message-loop cycle.
         PaintPending();
         return 0;
+
+    case WM_CHAR:
+        if (m_focusField >= 0)
+        {
+            HandleTextChar(static_cast<wchar_t>(wParam));
+            return 0;
+        }
+        break;
 
     case WM_MOUSEMOVE:
         OnMouseMove(ClientPoint());
@@ -2910,6 +4010,10 @@ LRESULT SettingsWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam
         break;
 
     case WM_KEYDOWN:
+        // While a text field is focused it consumes editing keys and Enter/Esc
+        // (which then just leave the field instead of closing the dialog).
+        if (m_focusField >= 0 && HandleFocusedFieldKey(wParam))
+            return 0;
         if (wParam == VK_ESCAPE)
         {
             Close(false);

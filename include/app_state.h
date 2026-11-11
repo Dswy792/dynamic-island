@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include <string>
+
 // ---------------------------------------------------------------------------
 // Island configuration enums (persisted in the registry as DWORDs)
 // ---------------------------------------------------------------------------
@@ -50,6 +52,7 @@ constexpr UINT kTimerAutoHide = 2;    // mouse / fullscreen auto-hide monitor
 constexpr UINT kTimerAnimation = 3;   // animation tick (~60 fps)
 constexpr UINT kTimerTray = 4;        // tray tooltip refresh
 constexpr UINT kTimerNotificationDismiss = 5; // hide the message peek again
+constexpr UINT kTimerCountdown = 6;           // 3-second recording countdown
 
 constexpr UINT kTrayCallbackMessage = WM_APP + 1;
 constexpr UINT kMsgShowSettings = WM_APP + 2;     // second instance / tray icon
@@ -74,6 +77,12 @@ constexpr int kHideDelayMaxSeconds = 3600;
 constexpr int kNotifyPeekSecondsMin = 0;
 constexpr int kNotifyPeekSecondsMax = 10;
 constexpr int kNotifyPeekSecondsDefault = 0;
+
+// Meeting / video notes (v5.4)
+constexpr int kRecordingOneHourSeconds = 3600;
+constexpr int kRecordingTwoHoursSeconds = 7200;
+constexpr int kRecordingUnlimitedSeconds = 0; // 0 = no limit
+constexpr int kRecordingCountdownSeconds = 3;
 
 constexpr int kTooltipRefreshIntervalMs = 20000;
 constexpr int kAutoHideCheckIntervalMs = 100;
@@ -111,6 +120,14 @@ struct AppSettings
     bool notifyWeChat = true;
     bool notifyQQ = true;
     int notifyPeekSeconds = kNotifyPeekSecondsDefault; // 0 = stay, 1..10 = auto-collapse
+
+    // Meeting / video notes (system audio recording + AI summary).
+    std::wstring recordSaveDir; // empty -> <exe folder>\recordings
+    bool recordAutoSummary = true;
+    std::wstring aiApiBase = L"https://api.openai.com/v1";
+    std::wstring aiApiKey;
+    std::wstring aiSttModel = L"whisper-1";
+    std::wstring aiSummaryModel = L"gpt-4o-mini";
 };
 
 extern AppSettings g_settings;

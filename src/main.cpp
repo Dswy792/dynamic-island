@@ -16,6 +16,8 @@
 #include "island.h"
 #include "layout.h"
 #include "notifications.h"
+#include "recorder.h"
+#include "recording_dialogs.h"
 #include "rendering.h"
 #include "resource.h"
 #include "settings.h"
@@ -53,6 +55,67 @@ bool s_subDismissTimerRunning = false;
 int s_pressedSub = -1;
 int s_hoveredSub = -1;
 bool s_lastNotifyEnable = false;
+
+// --- v5.4 hover feature row -------------------------------------------------
+// Only the "会议 / 视频纪要" slot is enabled today; the layout reserves room for
+// up to four so adding more features later needs no geometry change.
+constexpr int kEnabledFeatureSlots = 1;
+constexpr UINT kTimerRecordingPulse = 7; // local to the island window
+constexpr UINT kTimerIslandToast = 8;
+constexpr int kRecordingPulseMs = 50;
+constexpr ULONGLONG kActivityLongPressMs = 700;
+constexpr ULONGLONG kToastVisibleMs = 4500;
+
+bool s_forceHoverRowForTest = false; // internal --test-hover-row hook
+bool s_hoverLeavePending = false;
+int s_hoveredFeatureSlot = -1;
+int s_pressedFeatureSlot = -1;
+
+// --- v5.4 recording flow ----------------------------------------------------
+bool s_countdownActive = false;
+int s_countdownRemaining = 0;
+int s_pendingLimitSeconds = kRecordingOneHourSeconds;
+bool s_toastVisible = false;
+bool s_toastTimerRunning = false;
+ULONGLONG s_toastDeadlineTick = 0;
+
+// --- v5.4 recording activity circle ----------------------------------------
+bool s_activityVisible = false;
+bool s_testRecordStart = false; // --test-record-start bypasses the AI config gate
+bool s_activityHovered = false;
+bool s_pressedActivity = false;
+bool s_activityStopSent = false;
+ULONGLONG s_activityPressTick = 0;
+bool s_recordingPulseTimerRunning = false;
+RecorderState s_lastRecorderState = RecorderState::Idle;
+int s_lastElapsedSeconds = -1;
+std::wstring s_activityTooltipText;
+
+// Built-in visual demo for the recorder (--test-recording-circle and friends):
+// the real recorder engine is asynchronous, so the UI states can be exercised
+// without opening an audio device. Normal runs never touch s_demoRecording.
+bool s_demoRecording = false;
+bool s_demoAutoFinish = false;
+RecorderState s_demoState = RecorderState::Idle;
+ULONGLONG s_demoSegmentStartTick = 0;
+ULONGLONG s_demoElapsedMs = 0;
+ULONGLONG s_demoStateTick = 0;
+std::wstring s_demoMessage;
+
+// Forward declarations of the recording UI implementation (defined below the
+// window procedure helpers so they can call RevealIsland / ShowIslandSettings).
+RecorderState CurrentRecorderState();
+int CurrentElapsedSeconds();
+int CurrentLimitSeconds();
+bool IsRecordingUiActive();
+void RefreshRecordingVisual(bool force);
+void TickRecordingCountdown();
+void TickIslandToast();
+void RefreshRecordingPulse();
+void StopRecordingFromUi();
+void ToggleRecordingPause();
+void StartRecordingCountdown(int limitSeconds);
+void OnFeatureSlotClicked(int slot);
 
 void ApplyDpiAwareness()
 {
@@ -109,9 +172,52 @@ IslandClusterGeometry CurrentClusterGeometry()
 {
     float progress[kNotificationSourceCount] = {GetSubIslandProgress(0),
                                                 GetSubIslandProgress(1)};
+    IslandOverlayState overlays;
+    GetCurrentIslandOverlays(overlays);
     return ComputeIslandClusterGeometry(GetIslandHoverProgress(),
                                         GetIslandHideProgress(), progress,
-                                        s_hoveredSub, s_hoveredSub >= 0);
+                                        s_hoveredSub, s_hoveredSub >= 0,
+                                        overlays);
+}
+
+// --- v5.4 hover feature row / recording circle hit testing -----------------
+int HitTestFeatureSlot(POINT screenPoint)
+{
+    if (GetFeatureRowProgress() < 0.35f)
+        return -1;
+    const IslandClusterGeometry geometry = CurrentClusterGeometry();
+    for (int i = 0; i < kFeatureSlotCount; ++i)
+    {
+        if (geometry.featureSlots[i].right <= geometry.featureSlots[i].left)
+            continue;
+        if (PointInRect(geometry.featureSlots[i], screenPoint))
+            return i;
+    }
+    return -1;
+}
+
+bool HitTestActivityCircle(POINT screenPoint)
+{
+    if (!s_activityVisible || GetActivityCircleProgress() < 0.35f)
+        return false;
+    const IslandClusterGeometry geometry = CurrentClusterGeometry();
+    return PointInRect(geometry.activityCircle, screenPoint);
+}
+
+// Area that keeps the hover state alive while the mouse crosses the fully
+// transparent gap between the capsule and the feature row.
+bool IsPointInHoverKeepZone(POINT screenPoint)
+{
+    const IslandClusterGeometry geometry = CurrentClusterGeometry();
+    const int capsulePad = ScaleDip(10);
+    if (PointInRect(InflateRectCopy(geometry.capsule, capsulePad, capsulePad),
+                    screenPoint))
+        return true;
+    if (GetFeatureRowProgress() > 0.15f &&
+        PointInRect(InflateRectCopy(geometry.featureRow, ScaleDip(6), ScaleDip(6)),
+                    screenPoint))
+        return true;
+    return false;
 }
 
 int HitTestSubIsland(POINT screenPoint)
@@ -146,6 +252,26 @@ void ShowIslandSettings();
 
 void OnLButtonDownOnIsland(POINT cursor)
 {
+    // v5.4: recording activity circle (click = pause/resume, long press = stop).
+    if (HitTestActivityCircle(cursor))
+    {
+        s_pressedActivity = true;
+        s_activityStopSent = false;
+        s_activityPressTick = GetTickCount64();
+        SetCapture(g_hwnd);
+        RefreshRecordingVisual(true);
+        return;
+    }
+
+    // v5.4: hover feature row slot.
+    const int featureSlot = HitTestFeatureSlot(cursor);
+    if (featureSlot >= 0)
+    {
+        s_pressedFeatureSlot = featureSlot;
+        SetCapture(g_hwnd);
+        return;
+    }
+
     const int sub = HitTestSubIsland(cursor);
     if (sub >= 0)
     {
@@ -167,6 +293,33 @@ void OnLButtonDownOnIsland(POINT cursor)
 
 void OnLButtonUpOnIsland(POINT cursor)
 {
+    // v5.4: recording activity circle. A short click toggles pause/resume; the
+    // long-press-to-stop action was already dispatched by the pulse timer.
+    if (s_pressedActivity)
+    {
+        const bool stopHandled = s_activityStopSent;
+        s_pressedActivity = false;
+        s_activityStopSent = false;
+        if (GetCapture() == g_hwnd)
+            ReleaseCapture();
+        if (!stopHandled)
+            ToggleRecordingPause();
+        RefreshRecordingVisual(true);
+        return;
+    }
+
+    // v5.4: feature row slot click opens the recording dialogs.
+    if (s_pressedFeatureSlot >= 0)
+    {
+        const int slot = s_pressedFeatureSlot;
+        s_pressedFeatureSlot = -1;
+        if (GetCapture() == g_hwnd)
+            ReleaseCapture();
+        if (HitTestFeatureSlot(cursor) == slot)
+            OnFeatureSlotClicked(slot);
+        return;
+    }
+
     if (s_pressedSub >= 0)
     {
         const int sub = s_pressedSub;
@@ -260,11 +413,36 @@ void RaiseIslandAboveFullscreen()
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
 }
 
+void UpdateHoverLeavePending()
+{
+    if (!s_hoverLeavePending)
+        return;
+
+    POINT cursor = {};
+    GetCursorPos(&cursor);
+    if (IsPointInHoverKeepZone(cursor))
+        return; // the user is still moving between the capsule and the row
+
+    s_hoverLeavePending = false;
+    s_hovering = false;
+    SetIslandHoverTarget(false);
+    SetFeatureRowVisibleTarget(false);
+    if (s_hoveredFeatureSlot >= 0)
+    {
+        s_hoveredFeatureSlot = -1;
+        SetFeatureRowInfo(kEnabledFeatureSlots, -1);
+    }
+    InvalidateIslandContent();
+    RenderIslandFrame(true);
+}
+
 void UpdateAutoHide()
 {
     const ULONGLONG now = GetTickCount64();
     POINT cursor = {};
     GetCursorPos(&cursor);
+
+    UpdateHoverLeavePending();
 
     const bool gameFullscreen = IsGameFullscreenActive();
     const bool otherFullscreen = !gameFullscreen && IsFullscreenAppActive();
@@ -298,8 +476,9 @@ void UpdateAutoHide()
     }
     s_lastOtherFullscreen = otherFullscreen;
 
-    // Keep the island on screen while message circles are visible.
-    if (IsAnySubIslandVisible())
+    // Keep the island on screen while message circles or the recording UI are
+    // visible (a running recording must always be reachable).
+    if (IsAnySubIslandVisible() || IsRecordingUiActive())
     {
         s_lastInsideTick = now;
         return;
@@ -402,8 +581,607 @@ void CheckSubIslandDeadlines()
 void ShowIslandSettings()
 {
     RevealIsland();
+    CloseRecordingDialogs();
     ShowSettingsDialog(g_hwnd);
 }
+
+// ===========================================================================
+// v5.4 meeting / video notes: hover feature row, recording dialogs, countdown,
+// activity circle and result messages.
+// ===========================================================================
+std::wstring FormatElapsedClock(int seconds)
+{
+    if (seconds < 0)
+        seconds = 0;
+    const int hours = seconds / 3600;
+    const int minutes = (seconds % 3600) / 60;
+    const int remaining = seconds % 60;
+    wchar_t buffer[32] = {};
+    if (hours > 0)
+        swprintf_s(buffer, L"%d:%02d:%02d", hours, minutes, remaining);
+    else
+        swprintf_s(buffer, L"%02d:%02d", minutes, remaining);
+    return buffer;
+}
+
+std::wstring FileNameFromPath(const std::wstring& path)
+{
+    const wchar_t* slash = wcsrchr(path.c_str(), L'\\');
+    return slash != nullptr ? std::wstring(slash + 1) : path;
+}
+
+// --- recorder state (with the built-in visual test mode on top) ------------
+void AccumulateDemoElapsed()
+{
+    if (!s_demoRecording || s_demoState != RecorderState::Recording)
+        return;
+    const ULONGLONG now = GetTickCount64();
+    if (s_demoSegmentStartTick == 0)
+    {
+        s_demoSegmentStartTick = now;
+        return;
+    }
+    s_demoElapsedMs += now - s_demoSegmentStartTick;
+    s_demoSegmentStartTick = now;
+}
+
+void AdvanceDemoRecording()
+{
+    if (!s_demoRecording || !s_demoAutoFinish)
+        return;
+    const ULONGLONG now = GetTickCount64();
+    if (s_demoState == RecorderState::Stopping)
+    {
+        if (now - s_demoStateTick >= 1800)
+        {
+            s_demoState = RecorderState::Summarizing;
+            s_demoStateTick = now;
+        }
+    }
+    else if (s_demoState == RecorderState::Summarizing)
+    {
+        if (now - s_demoStateTick >= 2000)
+        {
+            s_demoState = RecorderState::Idle;
+            s_demoAutoFinish = false;
+            s_demoMessage = L"会议纪要已生成（演示模式）";
+        }
+    }
+}
+
+RecorderState CurrentRecorderState()
+{
+    if (s_demoRecording)
+        return s_demoState;
+    return RecorderGetState();
+}
+
+int CurrentElapsedSeconds()
+{
+    if (s_demoRecording)
+    {
+        AccumulateDemoElapsed();
+        return static_cast<int>(s_demoElapsedMs / 1000);
+    }
+    return RecorderGetElapsedSeconds();
+}
+
+int CurrentLimitSeconds()
+{
+    if (s_demoRecording)
+        return kRecordingOneHourSeconds;
+    return RecorderGetLimitSeconds();
+}
+
+bool IsRecordingUiActive()
+{
+    return s_countdownActive || s_activityVisible || s_toastVisible ||
+           CurrentRecorderState() != RecorderState::Idle ||
+           IsRecordingDialogOpen();
+}
+
+bool IsRecordingAiConfigured()
+{
+    // The feature only keeps the text result, so the AI endpoint and API key are
+    // mandatory: without them the audio would be transcribed nowhere.
+    return !g_settings.aiApiKey.empty() && !g_settings.aiApiBase.empty();
+}
+
+std::wstring BuildRecordingTooltip(RecorderState state, int elapsed)
+{
+    const std::wstring clock = FormatElapsedClock(elapsed);
+    switch (state)
+    {
+    case RecorderState::Recording:
+        return L"记录中 " + clock + L" · 点击暂停 / 长按结束";
+    case RecorderState::Paused:
+        return L"已暂停 " + clock + L" · 点击继续 / 长按结束";
+    case RecorderState::Stopping:
+        return L"正在转写…";
+    case RecorderState::Summarizing:
+        return L"正在生成纪要…";
+    default:
+        return std::wstring();
+    }
+}
+
+float RecordingPressProgress()
+{
+    if (!s_pressedActivity)
+        return 0.0f;
+    const ULONGLONG held = GetTickCount64() - s_activityPressTick;
+    return std::min(1.0f, static_cast<float>(held) /
+                              static_cast<float>(kActivityLongPressMs));
+}
+
+void UpdateRecordingPulseTimer()
+{
+    const bool needed = s_activityVisible || s_pressedActivity ||
+                        CurrentRecorderState() != RecorderState::Idle ||
+                        IsActivityCircleVisibleTarget() ||
+                        GetActivityCircleProgress() > 0.001f;
+    if (needed && !s_recordingPulseTimerRunning)
+    {
+        SetTimer(g_hwnd, kTimerRecordingPulse, kRecordingPulseMs, nullptr);
+        s_recordingPulseTimerRunning = true;
+    }
+    else if (!needed && s_recordingPulseTimerRunning)
+    {
+        KillTimer(g_hwnd, kTimerRecordingPulse);
+        s_recordingPulseTimerRunning = false;
+    }
+}
+
+// --- transient result / error message below the island --------------------
+void ShowIslandToast(const std::wstring& text, bool error)
+{
+    if (g_hwnd == nullptr || text.empty())
+        return;
+    SetIslandToast(text, error);
+    s_toastVisible = true;
+    s_toastDeadlineTick = GetTickCount64() + kToastVisibleMs;
+    if (!s_toastTimerRunning)
+    {
+        SetTimer(g_hwnd, kTimerIslandToast, 200, nullptr);
+        s_toastTimerRunning = true;
+    }
+    InvalidateIslandContent();
+    RenderIslandFrame(true);
+}
+
+void TickIslandToast()
+{
+    if (!s_toastVisible)
+    {
+        if (s_toastTimerRunning && g_hwnd != nullptr)
+        {
+            KillTimer(g_hwnd, kTimerIslandToast);
+            s_toastTimerRunning = false;
+        }
+        return;
+    }
+    if (GetTickCount64() < s_toastDeadlineTick)
+        return;
+
+    s_toastVisible = false;
+    SetIslandToast(L"", false);
+    if (s_toastTimerRunning && g_hwnd != nullptr)
+    {
+        KillTimer(g_hwnd, kTimerIslandToast);
+        s_toastTimerRunning = false;
+    }
+    InvalidateIslandContent();
+    RenderIslandFrame(true);
+}
+
+void ShowRecordingResultToast()
+{
+    std::wstring message;
+    bool isError = false;
+    if (!s_demoMessage.empty() || s_demoRecording)
+    {
+        message = s_demoMessage.empty() ? L"转写已结束（演示模式）" : s_demoMessage;
+        s_demoMessage.clear();
+    }
+    else
+    {
+        // Only the text result is kept (no audio file, no audio folder).
+        // 纪要.md is the main result; when some speech chunks could not be
+        // transcribed the recorder keeps their audio in the system temp folder
+        // and reports the count through RecorderGetPendingChunkCount().
+        const std::wstring folder = RecorderGetLastFolder();
+        const std::wstring markdown = RecorderGetLastMarkdownPath();
+        const std::wstring transcript = RecorderGetLastTranscriptPath();
+        const std::wstring lastMessage = RecorderGetLastMessage();
+        const int pending = RecorderGetPendingChunkCount();
+        const std::wstring folderName =
+            folder.empty() ? std::wstring() : FileNameFromPath(folder);
+
+        if (!markdown.empty() || !transcript.empty())
+        {
+            message = markdown.empty()
+                          ? L"转写已生成：" + folderName
+                          : L"纪要已生成：" + folderName;
+            if (pending > 0)
+            {
+                wchar_t suffix[96] = {};
+                swprintf_s(suffix,
+                           L"；另有 %d 个片段待重转（音频保留在系统临时目录）",
+                           pending);
+                message += suffix;
+            }
+        }
+        else
+        {
+            message = lastMessage.empty() ? L"转写失败，未生成纪要" : lastMessage;
+            isError = true;
+        }
+    }
+    ShowIslandToast(message, isError);
+}
+
+// --- recording state machine ----------------------------------------------
+void StopRecordingFromUi()
+{
+    if (s_demoRecording)
+    {
+        if (s_demoState == RecorderState::Recording)
+            AccumulateDemoElapsed();
+        else if (s_demoState != RecorderState::Paused)
+            return;
+        s_demoSegmentStartTick = 0;
+        s_demoState = RecorderState::Stopping;
+        s_demoAutoFinish = true;
+        s_demoStateTick = GetTickCount64();
+        RefreshRecordingVisual(true);
+        return;
+    }
+    const RecorderState state = RecorderGetState();
+    if (state != RecorderState::Recording && state != RecorderState::Paused)
+        return;
+    RecorderStop();
+    RefreshRecordingVisual(true);
+}
+
+void ToggleRecordingPause()
+{
+    if (s_demoRecording)
+    {
+        if (s_demoState == RecorderState::Recording)
+        {
+            AccumulateDemoElapsed();
+            s_demoState = RecorderState::Paused;
+            s_demoSegmentStartTick = 0;
+        }
+        else if (s_demoState == RecorderState::Paused)
+        {
+            s_demoState = RecorderState::Recording;
+            s_demoSegmentStartTick = GetTickCount64();
+        }
+        else
+        {
+            return;
+        }
+        RefreshRecordingVisual(true);
+        return;
+    }
+
+    const RecorderState state = RecorderGetState();
+    if (state == RecorderState::Recording)
+        RecorderPause();
+    else if (state == RecorderState::Paused)
+        RecorderResume();
+    else
+        return;
+    RefreshRecordingVisual(true);
+}
+
+void RefreshRecordingVisual(bool force)
+{
+    AdvanceDemoRecording();
+
+    const RecorderState state = CurrentRecorderState();
+    const bool active = state != RecorderState::Idle;
+    const bool stateChanged = state != s_lastRecorderState;
+
+    if (stateChanged)
+    {
+        if (!active && s_lastRecorderState != RecorderState::Idle)
+        {
+            // Session finished (stopped / auto-stopped / failed): hide the
+            // circle and show the Markdown / result message for a moment.
+            s_activityVisible = false;
+            s_activityHovered = false;
+            SetActivityCircleVisibleTarget(false);
+            if (s_demoRecording)
+                s_demoRecording = false;
+            ShowRecordingResultToast();
+        }
+        else if (active)
+        {
+            s_activityVisible = true;
+            SetActivityCircleVisibleTarget(true);
+            RevealIsland();
+            s_lastInsideTick = GetTickCount64();
+        }
+        s_lastRecorderState = state;
+    }
+    else if (active != s_activityVisible)
+    {
+        s_activityVisible = active;
+        SetActivityCircleVisibleTarget(active);
+    }
+
+    const int elapsed = CurrentElapsedSeconds();
+    if (elapsed != s_lastElapsedSeconds || force)
+    {
+        s_lastElapsedSeconds = elapsed;
+        s_activityTooltipText = BuildRecordingTooltip(state, elapsed);
+    }
+
+    RecordingActivityVisual visual;
+    visual.visible = s_activityVisible;
+    visual.state = state;
+    visual.elapsedSeconds = elapsed;
+    visual.limitSeconds = CurrentLimitSeconds();
+    visual.hovered = s_activityHovered;
+    visual.pressProgress = RecordingPressProgress();
+    visual.pulseTick = static_cast<int>(GetTickCount64() / 40);
+    visual.tooltip = s_activityHovered ? s_activityTooltipText : std::wstring();
+    SetRecordingActivityVisual(visual);
+
+    UpdateRecordingPulseTimer();
+    RenderIslandFrame(force);
+}
+
+void RefreshRecordingPulse()
+{
+    const ULONGLONG now = GetTickCount64();
+    if (s_pressedActivity && !s_activityStopSent &&
+        now - s_activityPressTick >= kActivityLongPressMs)
+    {
+        s_activityStopSent = true;
+        StopRecordingFromUi();
+    }
+    RefreshRecordingVisual(false);
+}
+
+// --- 3 second countdown + starting the recorder ---------------------------
+void OnRecordingDialogAction(int limitSeconds, void* context);
+
+void UpdateCountdownText()
+{
+    wchar_t buffer[64] = {};
+    swprintf_s(buffer, L"%d 秒后开始记录", s_countdownRemaining);
+    SetIslandCountdownText(buffer);
+}
+
+void StartRecordingCountdown(int limitSeconds)
+{
+    if (g_hwnd == nullptr)
+        return;
+
+    if (!s_testRecordStart && !IsRecordingAiConfigured())
+    {
+        ShowRecordingConfigNoticeDialog(g_hwnd, &OnRecordingDialogAction, nullptr);
+        return;
+    }
+
+    s_pendingLimitSeconds = limitSeconds;
+    s_countdownRemaining = std::max(1, kRecordingCountdownSeconds);
+    s_countdownActive = true;
+    UpdateCountdownText();
+    SetTimer(g_hwnd, kTimerCountdown, 1000, nullptr);
+
+    // The dialog just closed; make sure the island is shown unhovered.
+    RevealIsland();
+    s_hovering = false;
+    s_hoverLeavePending = false;
+    SetIslandHoverTarget(false);
+    SetFeatureRowVisibleTarget(false);
+    s_hoveredFeatureSlot = -1;
+    SetFeatureRowInfo(kEnabledFeatureSlots, -1);
+    InvalidateIslandContent();
+    RenderIslandFrame(true);
+}
+
+void StartRecordingNow(int limitSeconds)
+{
+    std::wstring error;
+    const std::wstring directory = ResolveRecordingSaveDirectory();
+    if (!EnsureRecordingDirectory(directory, error))
+    {
+        ShowIslandToast(L"无法创建纪要目录：" + error, true);
+        RefreshRecordingVisual(true);
+        return;
+    }
+
+    if (!RecorderStart(limitSeconds, directory, RecorderMakeFolderName()))
+    {
+        std::wstring message = RecorderGetLastMessage();
+        if (message.empty())
+            message = L"无法打开音频设备";
+        ShowIslandToast(L"记录失败：" + message, true);
+        RefreshRecordingVisual(true);
+        return;
+    }
+
+    RevealIsland();
+    s_lastInsideTick = GetTickCount64();
+    RefreshRecordingVisual(true);
+}
+
+void TickRecordingCountdown()
+{
+    if (!s_countdownActive)
+        return;
+
+    --s_countdownRemaining;
+    if (s_countdownRemaining > 0)
+    {
+        UpdateCountdownText();
+        InvalidateIslandContent();
+        RenderIslandFrame(true);
+        return;
+    }
+
+    if (g_hwnd != nullptr)
+        KillTimer(g_hwnd, kTimerCountdown);
+    s_countdownActive = false;
+    SetIslandCountdownText(L"");
+    InvalidateIslandContent();
+    StartRecordingNow(s_pendingLimitSeconds);
+}
+
+// --- feature row click / dialog chain -------------------------------------
+void OnRecordingDialogAction(int limitSeconds, void* context)
+{
+    (void)context;
+    if (limitSeconds == -2)
+    {
+        // The "AI not configured" notice: open the settings window so the user
+        // can fill in the AI endpoint / API key.
+        ShowIslandSettings();
+        return;
+    }
+    if (limitSeconds < 0)
+    {
+        // Confirmation step accepted: now let the user pick the duration.
+        ShowRecordingDurationDialog(g_hwnd, &OnRecordingDialogAction, nullptr);
+        return;
+    }
+    StartRecordingCountdown(limitSeconds);
+}
+
+void ShowRecordingFlow()
+{
+    s_hovering = false;
+    s_hoverLeavePending = false;
+    SetIslandHoverTarget(false);
+    SetFeatureRowVisibleTarget(false);
+    s_hoveredFeatureSlot = -1;
+    SetFeatureRowInfo(kEnabledFeatureSlots, -1);
+    InvalidateIslandContent();
+    RenderIslandFrame(true);
+    ShowRecordingConfirmDialog(g_hwnd, &OnRecordingDialogAction, nullptr);
+}
+
+void OnFeatureSlotClicked(int slot)
+{
+    if (slot != 0)
+        return;
+    if (s_countdownActive)
+        return;
+    if (CurrentRecorderState() != RecorderState::Idle)
+    {
+        ShowIslandToast(L"正在记录 · 点击圆环暂停，长按结束", false);
+        return;
+    }
+    if (IsRecordingDialogOpen())
+        return;
+    if (!IsRecordingAiConfigured())
+    {
+        ShowRecordingConfigNoticeDialog(g_hwnd, &OnRecordingDialogAction, nullptr);
+        return;
+    }
+    ShowRecordingFlow();
+}
+
+// --- internal visual test hooks -------------------------------------------
+int TestLimitFromEnvironment()
+{
+    wchar_t buffer[32] = {};
+    const DWORD length =
+        GetEnvironmentVariableW(L"DSH_RECORD_LIMIT_SECONDS", buffer, 32);
+    if (length > 0 && length < 32)
+    {
+        wchar_t* end = nullptr;
+        const long value = wcstol(buffer, &end, 10);
+        if (end != buffer && value >= 0 && value <= 86400)
+            return static_cast<int>(value);
+    }
+    return kRecordingOneHourSeconds;
+}
+
+void StartDemoRecording(RecorderState initialState)
+{
+    s_demoRecording = true;
+    s_demoAutoFinish = false;
+    s_demoState = initialState;
+    s_demoElapsedMs = 0;
+    s_demoSegmentStartTick =
+        initialState == RecorderState::Recording ? GetTickCount64() : 0;
+    s_demoStateTick = GetTickCount64();
+    s_demoMessage.clear();
+    s_lastRecorderState = RecorderState::Idle;
+    s_activityVisible = true;
+    SetActivityCircleVisibleTarget(true);
+    RevealIsland();
+    RefreshRecordingVisual(true);
+}
+
+void ForceHoverRowForTest()
+{
+    s_forceHoverRowForTest = true;
+    s_hovering = true;
+    SetIslandHoverTarget(true);
+    SetFeatureRowVisibleTarget(true);
+    s_hoveredFeatureSlot = 0;
+    SetFeatureRowInfo(kEnabledFeatureSlots, 0);
+    FinishIslandAnimation();
+    InvalidateIslandContent();
+    RenderIslandFrame(true);
+}
+
+void RunRecordingTestHooks(LPCWSTR commandLine)
+{
+    if (commandLine == nullptr)
+        return;
+
+    if (wcsstr(commandLine, L"--test-hover-row") != nullptr)
+        ForceHoverRowForTest();
+
+    if (wcsstr(commandLine, L"--test-recording-confirm") != nullptr)
+        ShowRecordingConfirmDialog(g_hwnd, &OnRecordingDialogAction, nullptr);
+
+    if (wcsstr(commandLine, L"--test-recording-wheel") != nullptr)
+        ShowRecordingDurationDialog(g_hwnd, &OnRecordingDialogAction, nullptr);
+
+    if (wcsstr(commandLine, L"--test-recording-notice") != nullptr)
+        ShowRecordingConfigNoticeDialog(g_hwnd, &OnRecordingDialogAction, nullptr);
+
+    if (wcsstr(commandLine, L"--test-recording-circle") != nullptr)
+        StartDemoRecording(RecorderState::Recording);
+
+    if (wcsstr(commandLine, L"--test-recording-paused") != nullptr)
+        StartDemoRecording(RecorderState::Paused);
+
+    if (wcsstr(commandLine, L"--test-recording-summarizing") != nullptr)
+        StartDemoRecording(RecorderState::Summarizing);
+
+    if (wcsstr(commandLine, L"--test-recording-tooltip") != nullptr)
+    {
+        StartDemoRecording(RecorderState::Recording);
+        s_activityHovered = true;
+        RefreshRecordingVisual(true);
+    }
+
+    if (wcsstr(commandLine, L"--test-toast") != nullptr)
+        ShowIslandToast(L"会议纪要已生成：会议纪要_20261111_170001.md", false);
+
+    if (wcsstr(commandLine, L"--test-toast-partial") != nullptr)
+        ShowIslandToast(
+            L"纪要已生成：会议纪要_20261111_180001；另有 2 个片段待重转"
+            L"（音频保留在系统临时目录）",
+            false);
+
+    if (wcsstr(commandLine, L"--test-record-start") != nullptr)
+    {
+        s_testRecordStart = true;
+        StartRecordingCountdown(TestLimitFromEnvironment());
+    }
+}
+
 
 void HandleCommand(WORD command)
 {
@@ -618,6 +1396,15 @@ LRESULT CALLBACK IslandWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
         case kTimerNotificationDismiss:
             CheckSubIslandDeadlines();
             return 0;
+        case kTimerCountdown:
+            TickRecordingCountdown();
+            return 0;
+        case kTimerRecordingPulse:
+            RefreshRecordingPulse();
+            return 0;
+        case kTimerIslandToast:
+            TickIslandToast();
+            return 0;
         default:
             return 0;
         }
@@ -631,27 +1418,61 @@ LRESULT CALLBACK IslandWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
             UpdateDrag(cursor);
             return 0;
         }
+        if (s_forceHoverRowForTest)
+            return 0; // forced screenshot state: ignore the real mouse
+
+        s_hoverLeavePending = false;
 
         const int sub = HitTestSubIsland(cursor);
         if (sub != s_hoveredSub)
             SetHoveredSub(sub);
 
-        bool overMain = false;
+        // v5.4 hover feature row: highlight the icon under the mouse.
+        int featureSlot = -1;
         if (sub < 0)
+            featureSlot = HitTestFeatureSlot(cursor);
+        if (featureSlot != s_hoveredFeatureSlot)
+        {
+            s_hoveredFeatureSlot = featureSlot;
+            SetFeatureRowInfo(kEnabledFeatureSlots, featureSlot);
+            InvalidateIslandContent();
+            RenderIslandFrame(true);
+        }
+
+        // v5.4 recording activity circle hover -> tooltip with elapsed time.
+        const bool overActivity = HitTestActivityCircle(cursor);
+        if (overActivity != s_activityHovered)
+        {
+            s_activityHovered = overActivity;
+            RefreshRecordingVisual(true);
+        }
+
+        bool overMain = false;
+        if (sub < 0 && !overActivity)
         {
             const IslandClusterGeometry geometry = CurrentClusterGeometry();
-            overMain = PointInRect(geometry.capsule, cursor);
+            const int padding = ScaleDip(3);
+            overMain =
+                PointInRect(InflateRectCopy(geometry.capsule, padding, padding),
+                            cursor);
+            if (!overMain && GetFeatureRowProgress() > 0.15f)
+            {
+                overMain = PointInRect(
+                    InflateRectCopy(geometry.featureRow, padding, padding), cursor);
+            }
         }
 
         if (overMain && !s_hovering)
         {
             s_hovering = true;
             SetIslandHoverTarget(true);
+            SetFeatureRowVisibleTarget(true);
         }
         else if (!overMain && s_hovering)
         {
             s_hovering = false;
             SetIslandHoverTarget(false);
+            SetFeatureRowVisibleTarget(false);
         }
 
         if (!s_hovering)
@@ -666,11 +1487,41 @@ LRESULT CALLBACK IslandWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
     }
 
     case WM_MOUSELEAVE:
+    {
+        if (s_forceHoverRowForTest)
+            return 0;
+
+        POINT cursor = {};
+        GetCursorPos(&cursor);
+        if (IsPointInHoverKeepZone(cursor))
+        {
+            // The fully transparent gap between the capsule and the feature row
+            // reports a leave although the user is still interacting with the
+            // cluster; keep the hover and re-check on the auto-hide tick.
+            s_hoverLeavePending = true;
+            return 0;
+        }
+
+        s_hoverLeavePending = false;
         s_hovering = false;
         SetIslandHoverTarget(false);
+        SetFeatureRowVisibleTarget(false);
         SetHoveredSub(-1);
+        if (s_hoveredFeatureSlot >= 0)
+        {
+            s_hoveredFeatureSlot = -1;
+            SetFeatureRowInfo(kEnabledFeatureSlots, -1);
+        }
+        if (s_activityHovered)
+        {
+            s_activityHovered = false;
+            RefreshRecordingVisual(true);
+        }
+        InvalidateIslandContent();
+        RenderIslandFrame(true);
         s_lastInsideTick = GetTickCount64();
         return 0;
+    }
 
     case WM_LBUTTONDOWN:
     {
@@ -692,6 +1543,13 @@ LRESULT CALLBACK IslandWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
         if (s_dragging)
             EndDrag(false);
         s_pressedSub = -1;
+        s_pressedFeatureSlot = -1;
+        if (s_pressedActivity)
+        {
+            s_pressedActivity = false;
+            s_activityStopSent = false;
+            RefreshRecordingVisual(true);
+        }
         return 0;
 
     case WM_SETCURSOR:
@@ -773,6 +1631,16 @@ LRESULT CALLBACK IslandWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
         KillTimer(hwnd, kTimerAutoHide);
         KillTimer(hwnd, kTimerTray);
         KillTimer(hwnd, kTimerNotificationDismiss);
+        KillTimer(hwnd, kTimerCountdown);
+        KillTimer(hwnd, kTimerRecordingPulse);
+        KillTimer(hwnd, kTimerIslandToast);
+        s_countdownActive = false;
+        s_recordingPulseTimerRunning = false;
+        s_toastTimerRunning = false;
+        // Best effort: let the recorder finalise the audio file on exit.
+        if (CurrentRecorderState() != RecorderState::Idle)
+            RecorderStop();
+        CloseRecordingDialogs();
         StopIslandAnimationTimer();
         ShutdownNotifications();
         ShutdownChatWatcher();
@@ -853,6 +1721,7 @@ void ApplySettingsAndRefresh()
     InitIslandLayout(g_hwnd);
     InvalidateIslandContent();
     FinishIslandAnimation();
+    RefreshRecordingVisual(true);
     UpdateTrayIcon();
     RefreshSettingsDialog();
 }
@@ -1034,6 +1903,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     InitIslandLayout(g_hwnd);
     InitIslandAnimation(g_hwnd);
     InitIslandRenderer(g_hwnd);
+    SetFeatureRowInfo(kEnabledFeatureSlots, -1);
 
     s_taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
     s_lastInsideTick = GetTickCount64();
@@ -1088,6 +1958,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
             ShowNotificationSubIsland(second);
         }
     }
+
+    // v5.4 internal visual-test hooks (see RunRecordingTestHooks):
+    //   --test-hover-row              force the hover feature row visible
+    //   --test-recording-confirm      show the confirm dialog
+    //   --test-recording-wheel        show the duration wheel dialog
+    //   --test-recording-circle       demo activity circle (recording)
+    //   --test-recording-paused       demo activity circle (paused)
+    //   --test-recording-summarizing  demo activity circle (summarizing)
+    //   --test-recording-tooltip      demo circle + its hover tooltip
+    //   --test-recording-notice       show the "AI not configured" notice
+    //   --test-toast                  show a sample result message
+    //   --test-record-start           skip dialogs: countdown + real start
+    //                                 (limit from DSH_RECORD_LIMIT_SECONDS)
+    RunRecordingTestHooks(GetCommandLineW());
 
     MSG message = {};
     while (GetMessageW(&message, nullptr, 0, 0) > 0)

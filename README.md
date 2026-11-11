@@ -1,16 +1,17 @@
 # 灵动岛 (Dynamic Island)
 
-一个 Windows 顶部时间胶囊：平时显示时间/日期，微信、QQ 来新消息时在胶囊右侧弹出圆形副岛。
+一个 Windows 顶部时间胶囊：平时显示时间/日期，微信、QQ 来新消息时在胶囊右侧弹出圆形副岛；悬停胶囊还能打开"会议 / 视频纪要"，用 AI 把系统声音变成文字纪要（只存文字，不存录音）。
 
 纯 C++17 / Win32 / GDI+ 实现 · 单个 exe · 无 .NET / Java / 第三方运行库 · 零注入、不挂钩、不读进程内存
 
-**版本 5.3.0** · Windows 10 / 11
+**版本 5.4.0** · Windows 10 / 11
 
 ## 功能
 
 - **时间显示**：24/12 小时制、秒、上/下午；日期、年份、星期与多种日期格式可自由组合
 - **外观**：深色 / 浅色 / 跟随系统；小 / 中 / 大三档尺寸；字体大小、粗体、不透明度可调
 - **消息提醒**：微信（界面读取）与 QQ（系统通知）新消息弹出圆形副岛，内部为真实应用图标；悬停查看内容，点击打开应用并收起；默认常驻；支持隐私模式（只显示"有新消息"）
+- **会议 / 视频纪要**：悬停胶囊出现功能行，点摄像机图标录制系统声音，AI 实时转写并在结束后生成 Markdown 文字纪要；**只保存文字，不保存录音**（详见下文）
 - **行为**：自动隐藏、游戏全屏时隐藏（默认开启；视频 / 浏览器 / 演示等非游戏全屏保持可见并置顶）、开机自启；托盘菜单；设置窗口内可直接打开 Windows 日期和时间设置
 - **适配**：Per-Monitor V2 高 DPI、多显示器、跟随系统主题；左键打开设置、拖动移动位置
 - **兼容**：不注入、不挂钩、不读写聊天数据库，对游戏反作弊友好
@@ -20,12 +21,13 @@
 - Windows 10 / 11 x64
 - 编译：Visual Studio 2022（C++ 桌面开发工作负载）+ Windows SDK 10.0.17763 或更高（需其中 C++/WinRT 头文件）
 - 运行：无需额外运行库
+- AI 转写：需要可访问的 OpenAI 兼容接口（HTTPS，如 OpenAI / 兼容网关）；录制采集的是**系统播放声音**（WASAPI loopback），不需要麦克风
 
 ## 构建与运行
 
 ```powershell
-git clone https://github.com/Dswy792/time-dynamic-island.git
-cd time-dynamic-island
+git clone https://github.com/Dswy792/dynamic-island.git
+cd dynamic-island
 
 .\build.ps1              # 增量构建
 .\build.ps1 -Clean       # 全量重建
@@ -34,17 +36,37 @@ cd time-dynamic-island
 
 - 构建中间文件写入 `builds\`，脚本通过 vswhere 自动定位 Visual Studio
 - 只改一个模块时可快速语法检查：`powershell -NoProfile -ExecutionPolicy Bypass -File tools\compile-check.ps1 -Files src\main.cpp -Tag main`
-- 卸载 / 清理：`.\clean.ps1`（停止进程、删除 exe 与构建产物、清理开机自启和注册表设置）
+- 卸载 / 清理：`.\clean.ps1`（停止进程、删除 exe 与构建产物、清理开机自启和注册表设置；不会删除 `recordings/` 里的文字纪要）
 
 ## 使用
 
 - **左键**灵动岛打开设置；**右键**无操作；按住拖动可移动位置，松手保存
 - **托盘图标右键**：设置、日期和时间设置、开机自启动、重置位置、关于、退出
-- 设置窗口：`Enter` 确定、`Esc` 取消；"退出程序"带二次确认
+- 设置窗口：Win11 风格左侧导航三页（时间与外观 / 微信与 QQ / 会议与视频纪要；第一页保留灵动岛实时预览），`Enter` 确定、`Esc` 取消；"退出程序"带二次确认
+- **悬停功能行**：鼠标悬停主胶囊时，胶囊下方滑出功能图标行（当前为"会议 / 视频纪要"），后续功能会加在同一行
 - **副岛**：悬停显示"发送者：内容"（隐私模式只显示"微信 有新消息"）；点击打开/恢复微信或 QQ 并收起该副岛；默认常驻，可在设置里改为 1–10 秒自动收起
+- **录制中圆环**：副岛右侧的圆环显示状态（红点=录制、暂停条=暂停、转圈=转写、星形=生成纪要）；悬停显示"记录中 MM:SS · 点击暂停 / 长按结束"；点击暂停/继续，长按约 0.7 秒结束；到达所选时长上限会自动停止
+
+## 会议 / 视频纪要（v5.4）
+
+把会议 / 视频的**系统声音**交给 AI，生成可保存的文字纪要；**只保存文字，不保存录音**。
+
+**开始录制**：悬停主胶囊 → 点下方功能行的摄像机图标（"会议 / 视频纪要"）→ 确认"只保存文字纪要（Markdown/TXT），不保存录音" → 选择时长（1 小时 / 2 小时 / 不限制）→ 3 秒倒计时后开始采集系统声音（默认播放设备，不是麦克风）。
+
+**结果文件**（保存目录默认 `<exe目录>\recordings`，可在设置中修改；该目录已被 .gitignore 忽略）
+
+- `转写.md`：完整 / 部分转写；每成功一块立刻追加并落盘
+- `纪要.md`：AI 会议纪要（开启"录制结束后自动生成 AI 纪要"时）
+- `会话信息.txt`：时长、保存位置、结果文件与隐私说明
+- 失败时：`转写失败说明.txt`（含语音但转写失败的待重转片段清单）、`纪要说明.txt`（纪要失败原因）
+
+完成后灵动岛会短暂提示成功 / 部分失败（带待重转数量）/ 失败。**隐私与音频**：录制音频只写入 `%TEMP%\DynamicIslandRec` 下的临时 `.m4a`，转写 / 纪要完成后自动删除，保存目录中永远没有音频；含语音但转写失败的分块临时保留在 `%TEMP%\DynamicIslandRec\pending\<会话>` 供以后重试，纯静音失败分块直接删除。程序只采集系统播放声音，不采集麦克风。
+
+**AI 配置**（设置 → 会议与视频纪要）：OpenAI 兼容接口的 API 地址（默认 `https://api.openai.com/v1`）、API Key（掩码显示）、语音识别模型（默认 `whisper-1`）、摘要模型（默认 `gpt-4o-mini`），以及"录制结束后自动生成 AI 纪要"开关和保存目录 + 浏览按钮。未配置 API 地址 / API Key 时无法开始记录；API Key 仅保存在本机注册表。
+
+**已知限制**：依赖可访问的 AI 接口与网络，Key 无效时转写失败（已成功的分块仍保留在 `转写.md`）；暂不支持自动重试 `pending` 里的失败片段；设置里的 AI 文本输入框暂不支持中文输入法组合（按 ASCII 处理）；静音判定阈值约 -50 dBFS（20 ms 帧）；进程被强制结束时可能遗留 `%TEMP%\DynamicIslandRec` 下的临时音频，需要手动清理（`clean.ps1` 不处理 `%TEMP%` 或 `recordings/`）。
 
 ## 全屏行为
-
 - **非游戏全屏**（视频播放器、浏览器全屏视频、演示文稿等）：灵动岛保持可见，并自动置顶在全屏窗口之上，不会抢焦点
 - **游戏全屏**：灵动岛自动滑出隐藏，避免遮挡游戏；可在设置 → 行为 → 关闭"游戏全屏时隐藏"（新安装默认开启）
 - **检测方式**：Windows 报告独占 Direct3D 全屏（`QUNS_RUNNING_D3D_FULL_SCREEN`），或前台窗口铺满显示器且使用常见游戏引擎窗口类（`UnityWndClass` / `UnrealWindow` / `SDL_app` / `GLFW30` / `Valve001` / `CryENGINE` / `SGameWindow`）
@@ -71,13 +93,14 @@ cd time-dynamic-island
 
 - 位置：`HKCU\SOFTWARE\DynamicIsland`（`SettingsVersion = 2`）
 - 常用值：`Theme`、`WindowSize`、`Position`、`FontSize`、`BoldFont`、`Opacity`、`Use24Hour`、`ShowSeconds`、`ShowDate`、`DateFormat`、`AutoHide`、`HideDelaySeconds`、`HideOnFullscreen`（游戏全屏时隐藏，新安装默认开，旧配置保留原值）、`NotifyEnable`、`NotifyShowContent`、`NotifyWeChat`、`NotifyQQ`、`NotifyPeekSeconds`（0 = 常驻）
+- 会议 / 视频纪要：`RecordSaveDir`（REG_SZ，默认为 exe 目录下的 recordings）、`RecordAutoSummary`（DWORD，默认 1）、`AiApiBase`、`AiApiKey`、`AiSttModel`、`AiSummaryModel`（REG_SZ）；API Key 以明文保存在 HKCU（仅本机当前用户）
 - 手动修改注册表后重启程序生效；删除整个键恢复默认
 - 开机自启由 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 中的 `DynamicIsland` 值控制
 
 ## 项目结构
 
 ```
-src/                  实现（main / rendering / layout / animation / settings_dialog / notifications / chat_watcher / theme / time_format / tray / actions）
+src/                  实现（main / rendering / layout / animation / settings_dialog / recording_dialogs / recorder / summary / notifications / chat_watcher / theme / time_format / tray / actions）
 include/              头文件
 resources/            图标、manifest、资源与版本信息
 tools/                辅助脚本（compile-check.ps1、capture-screen.ps1）
@@ -94,10 +117,16 @@ docs/灵动岛实现计划.md  开发计划
 - **收不到微信提醒**：确认微信正在运行；微信大版本更新可能改变其界面结构
 - **收不到 QQ 提醒**：确认 QQ 与 Windows 的通知开关均已打开
 - **公众号 / 订阅号 / 免打扰群不提醒**：这是 v5.2.2 起的预期行为
+- **录音会保存吗**：不会；保存目录只有文字（转写.md / 纪要.md / 会话信息.txt），临时音频在 `%TEMP%\DynamicIslandRec`，处理完自动删除
+- **点摄像机提示需要配置 AI**：先到设置 → 会议与视频纪要填写 API 地址与 API Key；没有 AI 接口就无法转写（也就没有文字可保存）
+- **转写不完整 / 有"待重转"**：含语音但多次重试失败的片段在 `%TEMP%\DynamicIslandRec\pending`，清单见 转写失败说明.txt；当前需手动处理，暂不支持自动重试
+- **录制不到声音**：录的是系统播放声音（不用麦克风），请确认会议 / 视频正在本机播放且输出设备正确
+- **设置里输入中文没反应**：AI 输入框暂未实现中文输入法组合，可先粘贴或使用英文
 - **重复启动**：默认单实例，再次运行会直接打开设置窗口
 
 ## 更新日志
 
+- **v5.4.0**（2026-11-11）：新增悬停功能行与"会议 / 视频纪要"：WASAPI 采集系统声音、OpenAI 兼容接口分块转写并生成 Markdown 纪要；**只保存文字结果，录音临时文件处理完即删**（失败语音片段仅临时保留在 %TEMP% 供重试）；设置窗口改为 Win11 左侧导航三页（时间与外观 / 微信与 QQ / 会议与视频纪要），新增保存目录、自动纪要开关与 AI 接口配置；仓库更名为 dynamic-island
 - **v5.3.0**（2026-11-04）：非游戏全屏（视频 / 浏览器 / 演示）保持可见并自动置顶；仅游戏全屏隐藏；检测新增独占 D3D 判定与常见游戏引擎窗口类；设置项改名"游戏全屏时隐藏"，新安装默认开启
 - **v5.2.x**：微信 / QQ 消息副岛、提醒范围过滤、文件传输助手始终提醒、副岛默认常驻、图标缩小、设置窗口性能与布局优化
 - **v5.1**：退出程序按钮、系统时间设置入口、左键打开设置、新图标、设置窗口脏矩形重绘
@@ -111,4 +140,4 @@ docs/灵动岛实现计划.md  开发计划
 
 ---
 
-版本 5.3.0 · 2026-11-04 · C++17 / Win32 / GDI+ / MSVC / C++/WinRT · UI Automation
+版本 5.4.0 · 2026-11-11 · C++17 / Win32 / GDI+ / MSVC / C++/WinRT · UI Automation / WASAPI / Media Foundation

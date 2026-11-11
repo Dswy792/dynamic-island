@@ -15,14 +15,22 @@ constexpr float kHoverDurationMs = 170.0f;
 constexpr float kHideDurationMs = 260.0f;
 constexpr float kSubIslandShowMs = 220.0f;
 constexpr float kSubIslandHideMs = 180.0f;
+constexpr float kFeatureRowShowMs = 170.0f;
+constexpr float kFeatureRowHideMs = 140.0f;
+constexpr float kActivityShowMs = 240.0f;
+constexpr float kActivityHideMs = 180.0f;
 
 HWND s_hwnd = nullptr;
 bool s_hoverTarget = false;
 bool s_hiddenTarget = false;
 bool s_subTarget[kNotificationSourceCount] = {false, false};
+bool s_featureRowTarget = false;
+bool s_activityTarget = false;
 float s_hover = 0.0f;
 float s_hide = 0.0f;
 float s_sub[kNotificationSourceCount] = {0.0f, 0.0f};
+float s_featureRow = 0.0f;
+float s_activity = 0.0f;
 ULONGLONG s_lastTick = 0;
 bool s_timerRunning = false;
 
@@ -79,6 +87,10 @@ void InitIslandAnimation(HWND hwnd)
         s_subTarget[i] = false;
         s_sub[i] = 0.0f;
     }
+    s_featureRowTarget = false;
+    s_featureRow = 0.0f;
+    s_activityTarget = false;
+    s_activity = 0.0f;
     s_timerRunning = false;
 }
 
@@ -120,6 +132,42 @@ float GetSubIslandProgress(int sourceIndex)
     if (sourceIndex < 0 || sourceIndex >= kNotificationSourceCount)
         return 0.0f;
     return sourceIndex == 0 ? EaseOutCubic(s_sub[0]) : EaseOutCubic(s_sub[1]);
+}
+
+void SetFeatureRowVisibleTarget(bool visible)
+{
+    if (s_featureRowTarget == visible)
+        return;
+    s_featureRowTarget = visible;
+    StartTimer();
+}
+
+bool IsFeatureRowVisibleTarget()
+{
+    return s_featureRowTarget;
+}
+
+float GetFeatureRowProgress()
+{
+    return EaseOutCubic(s_featureRow);
+}
+
+void SetActivityCircleVisibleTarget(bool visible)
+{
+    if (s_activityTarget == visible)
+        return;
+    s_activityTarget = visible;
+    StartTimer();
+}
+
+bool IsActivityCircleVisibleTarget()
+{
+    return s_activityTarget;
+}
+
+float GetActivityCircleProgress()
+{
+    return EaseOutCubic(s_activity);
 }
 
 bool IsAnySubIslandVisible()
@@ -188,6 +236,20 @@ void UpdateIslandAnimation()
             settled = false;
     }
 
+    s_featureRow = MoveTowards(
+        s_featureRow, s_featureRowTarget ? 1.0f : 0.0f,
+        std::min(1.0f, deltaMs / (s_featureRowTarget ? kFeatureRowShowMs
+                                                     : kFeatureRowHideMs)));
+    if (s_featureRow != (s_featureRowTarget ? 1.0f : 0.0f))
+        settled = false;
+
+    s_activity = MoveTowards(
+        s_activity, s_activityTarget ? 1.0f : 0.0f,
+        std::min(1.0f, deltaMs / (s_activityTarget ? kActivityShowMs
+                                                   : kActivityHideMs)));
+    if (s_activity != (s_activityTarget ? 1.0f : 0.0f))
+        settled = false;
+
     if (settled)
         StopTimer();
 
@@ -200,6 +262,8 @@ void FinishIslandAnimation()
     s_hide = s_hiddenTarget ? 1.0f : 0.0f;
     for (int i = 0; i < kNotificationSourceCount; ++i)
         s_sub[i] = s_subTarget[i] ? 1.0f : 0.0f;
+    s_featureRow = s_featureRowTarget ? 1.0f : 0.0f;
+    s_activity = s_activityTarget ? 1.0f : 0.0f;
     StopTimer();
     RenderIslandFrame(true);
 }

@@ -16,6 +16,16 @@ bool IsSubIslandTarget(int sourceIndex);
 float GetSubIslandProgress(int sourceIndex);
 bool IsAnySubIslandVisible();
 
+// v5.4 hover feature row (pill with the feature icons below the capsule).
+void SetFeatureRowVisibleTarget(bool visible);
+bool IsFeatureRowVisibleTarget();
+float GetFeatureRowProgress();
+
+// v5.4 recording activity circle (pops out right of the message sub-islands).
+void SetActivityCircleVisibleTarget(bool visible);
+bool IsActivityCircleVisibleTarget();
+float GetActivityCircleProgress();
+
 bool IsIslandHoverTarget();
 bool IsIslandHiddenTarget();
 bool IsIslandAnimationRunning();
