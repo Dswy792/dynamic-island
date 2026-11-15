@@ -68,12 +68,18 @@ constexpr float kNoticeButtonGapDip = 10.0f;
 constexpr float kNoticeContentMarginDip = 20.0f;
 
 // Fullscreen overlay chrome.
-constexpr float kCloseRadiusDip = 19.0f;
-constexpr float kCloseMarginDip = 26.0f;
 constexpr float kBarWidthDip = 420.0f;
 constexpr float kBarHeightDip = 6.0f;
 constexpr float kExtendWidthDip = 156.0f;
 constexpr float kExtendHeightDip = 30.0f;
+constexpr float kSkipWidthDip = 54.0f;
+constexpr float kSkipHeightDip = 24.0f;
+constexpr float kSkipGapDip = 8.0f;
+
+// Date / time block margins per background.
+constexpr float kLandscapeTimeMarginDip = 56.0f;
+constexpr float kSolidTimeTopDip = 46.0f;
+constexpr float kGradientTimeMarginDip = 56.0f;
 
 constexpr REAL kPi = 3.14159265358979f;
 
@@ -220,13 +226,6 @@ RECT GetPrimaryWorkArea()
     return GetVirtualScreenRect();
 }
 
-RECT OffsetRectCopy(const RECT& rect, int dx, int dy)
-{
-    RECT result = rect;
-    OffsetRect(&result, dx, dy);
-    return result;
-}
-
 void AddRoundedRectPath(GraphicsPath& path, const RectF& rect, REAL radius)
 {
     const REAL maximumRadius = std::min(rect.Width, rect.Height) * 0.5f;
@@ -292,6 +291,17 @@ std::wstring FormatClock(int seconds)
 std::wstring ToWString(int value)
 {
     return std::to_wstring(value);
+}
+
+// Cheap "has the displayed minute changed" key (year/month/day/hour/minute).
+ULONGLONG CurrentMinuteKey()
+{
+    SYSTEMTIME now = {};
+    GetLocalTime(&now);
+    const ULONGLONG day =
+        (static_cast<ULONGLONG>(now.wYear) * 13ULL + now.wMonth) * 32ULL +
+        now.wDay;
+    return (day * 24ULL + now.wHour) * 60ULL + now.wMinute;
 }
 
 // ---------------------------------------------------------------------------
@@ -1150,15 +1160,17 @@ private:
     void DrawGradient(Graphics& graphics);
     void DrawVignette(Graphics& graphics);
     void DrawQuote(Graphics& graphics);
-    void DrawCloseButton(Graphics& graphics);
+    void DrawTimeBlock(Graphics& graphics);
+    void DrawSkipButton(Graphics& graphics);
     void DrawExtendButton(Graphics& graphics);
     void DrawProgress(Graphics& graphics);
     void RestoreRegion(Graphics& graphics, const RECT& region);
     void PresentFull(BYTE constantAlpha);
     void PresentRegion(const RECT& dirty);
-    void UpdateCloseRegion();
+    void UpdateSkipRegion();
     void UpdateExtendRegion();
     void UpdateProgressRegion();
+    void UpdateTimeRegion();
     void UpdateHover(POINT point);
     void OnMouseLeave();
     void OnLButtonDown(POINT point);
@@ -1169,12 +1181,13 @@ private:
     Font* GetFont(int pixelSize, bool bold, bool italic, bool cjk);
     RectF PrimaryRectF() const;
     RECT PrimaryRect() const;
-    RECT CloseRect() const;
+    RECT SkipRect() const;
     RECT ExtendRect() const;
     RECT BarRect() const;
     RECT RemainingTextRect() const;
     RECT ProgressRect() const;
-    int HitTest(POINT point) const; // 0 none, 1 close, 2 extend
+    RECT TimeRect() const;
+    int HitTest(POINT point) const; // 0 none, 1 skip, 2 extend
 
     HWND m_hwnd = nullptr;
     HWND m_owner = nullptr;
@@ -1195,6 +1208,7 @@ private:
     ULONGLONG m_startTick = 0;
     ULONGLONG m_endTick = 0;
     int m_lastRemainingSeconds = -1;
+    ULONGLONG m_lastMinuteKey = 0;
     bool m_fadeActive = false;
     ULONGLONG m_fadeStartTick = 0;
     BYTE m_currentAlpha = 255;
@@ -1265,15 +1279,18 @@ RECT RestOverlay::PrimaryRect() const
     return rect;
 }
 
-RECT RestOverlay::CloseRect() const
+RECT RestOverlay::SkipRect() const
 {
-    const RECT primary = PrimaryRect();
-    const int radius = RoundToInt(kCloseRadiusDip * m_scale);
-    const int margin = RoundToInt(kCloseMarginDip * m_scale);
-    const int centerX = primary.right - margin - radius;
-    const int centerY = primary.top + margin + radius;
-    RECT rect = {centerX - radius, centerY - radius, centerX + radius,
-                 centerY + radius};
+    // Subtle "跳过" right next to the remaining-time text.
+    const RECT text = RemainingTextRect();
+    const int width = RoundToInt(kSkipWidthDip * m_scale);
+    const int height = RoundToInt(kSkipHeightDip * m_scale);
+    const int centerY = (text.top + text.bottom) / 2;
+    RECT rect = {};
+    rect.left = text.right + RoundToInt(kSkipGapDip * m_scale);
+    rect.right = rect.left + width;
+    rect.top = centerY - height / 2;
+    rect.bottom = rect.top + height;
     return rect;
 }
 
@@ -1318,13 +1335,14 @@ RECT RestOverlay::BarRect() const
 
 RECT RestOverlay::RemainingTextRect() const
 {
+    // Right-aligned text box that ends just left of the "跳过" button.
     const RECT primary = PrimaryRect();
-    const int width = RoundToInt(440.0f * m_scale);
+    const int width = RoundToInt(320.0f * m_scale);
     const int height = RoundToInt(24.0f * m_scale);
     const int centerX = (primary.left + primary.right) / 2;
     RECT rect = {};
-    rect.left = centerX - width / 2;
-    rect.right = rect.left + width;
+    rect.right = centerX - RoundToInt(4.0f * m_scale);
+    rect.left = rect.right - width;
     rect.bottom = primary.bottom - RoundToInt(112.0f * m_scale);
     rect.top = rect.bottom - height;
     return rect;
@@ -1339,6 +1357,53 @@ RECT RestOverlay::ProgressRect() const
     rect.right = std::max(rect.right, bar.right);
     rect.bottom = std::max(rect.bottom, bar.bottom);
     const int pad = RoundToInt(14.0f * m_scale);
+    InflateRect(&rect, pad, pad);
+    return rect;
+}
+
+RECT RestOverlay::TimeRect() const
+{
+    const RECT primary = PrimaryRect();
+    const int pad = RoundToInt(26.0f * m_scale);
+    RECT rect = {};
+    switch (m_backgroundMode)
+    {
+    case SCREENSAVER_BG_SOLID:
+    {
+        const int width = RoundToInt(460.0f * m_scale);
+        const int height = RoundToInt(76.0f * m_scale);
+        const int centerX = (primary.left + primary.right) / 2;
+        const int top = primary.top + RoundToInt(kSolidTimeTopDip * m_scale);
+        rect.left = centerX - width / 2;
+        rect.right = centerX + width / 2;
+        rect.top = top;
+        rect.bottom = top + height;
+        break;
+    }
+    case SCREENSAVER_BG_GRADIENT:
+    {
+        const int width = RoundToInt(460.0f * m_scale);
+        const int height = RoundToInt(76.0f * m_scale);
+        const int margin = RoundToInt(kGradientTimeMarginDip * m_scale);
+        rect.left = primary.right - margin - width;
+        rect.right = primary.right - margin;
+        rect.top = primary.top + margin;
+        rect.bottom = primary.top + margin + height;
+        break;
+    }
+    case SCREENSAVER_BG_LANDSCAPE:
+    default:
+    {
+        const int width = RoundToInt(620.0f * m_scale);
+        const int height = RoundToInt(100.0f * m_scale);
+        const int margin = RoundToInt(kLandscapeTimeMarginDip * m_scale);
+        rect.left = primary.left + margin;
+        rect.right = primary.left + margin + width;
+        rect.top = primary.top + margin;
+        rect.bottom = primary.top + margin + height;
+        break;
+    }
+    }
     InflateRect(&rect, pad, pad);
     return rect;
 }
@@ -1804,33 +1869,133 @@ void RestOverlay::DrawQuote(Graphics& graphics)
     }
 }
 
-void RestOverlay::DrawCloseButton(Graphics& graphics)
+void RestOverlay::DrawSkipButton(Graphics& graphics)
 {
-    const RECT rect = CloseRect();
-    const RectF circle(static_cast<REAL>(rect.left), static_cast<REAL>(rect.top),
-                       static_cast<REAL>(rect.right - rect.left),
-                       static_cast<REAL>(rect.bottom - rect.top));
+    const RECT rect = SkipRect();
+    const RectF pill(static_cast<REAL>(rect.left), static_cast<REAL>(rect.top),
+                     static_cast<REAL>(rect.right - rect.left),
+                     static_cast<REAL>(rect.bottom - rect.top));
     const bool hovered = m_hovered == 1;
     const bool pressed = m_pressed == 1;
-    if (hovered || pressed)
-    {
-        SolidBrush brush(Color(hovered ? 74 : 96, 255, 255, 255));
-        graphics.FillEllipse(&brush, circle);
-    }
-    Pen border(Color(120, 255, 255, 255), std::max(1.0f, m_scale));
-    graphics.DrawEllipse(&border, circle);
 
-    const REAL centerX = circle.X + circle.Width * 0.5f;
-    const REAL centerY = circle.Y + circle.Height * 0.5f;
-    const REAL arm = circle.Width * 0.30f;
-    Pen pen(Color(hovered ? 245 : 200, 255, 255, 255),
-            std::max(1.2f, 1.8f * m_scale));
-    pen.SetStartCap(LineCapRound);
-    pen.SetEndCap(LineCapRound);
-    graphics.DrawLine(&pen, PointF(centerX - arm, centerY - arm),
-                      PointF(centerX + arm, centerY + arm));
-    graphics.DrawLine(&pen, PointF(centerX - arm, centerY + arm),
-                      PointF(centerX + arm, centerY - arm));
+    SolidBrush fill(Color(hovered ? 130 : (pressed ? 165 : 70), 0, 0, 0));
+    GraphicsPath path;
+    AddRoundedRectPath(path, pill, pill.Height * 0.5f);
+    graphics.FillPath(&fill, &path);
+    Pen border(Color(hovered ? 150 : 85, 255, 255, 255),
+               std::max(1.0f, m_scale));
+    graphics.DrawPath(&border, &path);
+
+    Font* font =
+        GetFont(std::max(6, RoundToInt(11.5f * m_scale)), false, false, true);
+    StringFormat format;
+    format.SetAlignment(StringAlignmentCenter);
+    format.SetLineAlignment(StringAlignmentCenter);
+    format.SetFormatFlags(StringFormatFlagsNoWrap);
+    SolidBrush text(Color(hovered ? 245 : 205, 250, 250, 252));
+    graphics.DrawString(L"跳过", -1, font, pill, &format, &text);
+}
+
+void RestOverlay::DrawTimeBlock(Graphics& graphics)
+{
+    SYSTEMTIME now = {};
+    GetLocalTime(&now);
+    const wchar_t* const weekdayNames[] = {L"日", L"一", L"二", L"三",
+                                           L"四", L"五", L"六"};
+    const int weekday = ClampInt(static_cast<int>(now.wDayOfWeek), 0, 6);
+
+    wchar_t timeText[16] = {};
+    swprintf_s(timeText, L"%02d:%02d", static_cast<int>(now.wHour),
+               static_cast<int>(now.wMinute));
+    wchar_t dateText[64] = {};
+    swprintf_s(dateText, L"%d年%d月%d日 星期%s", static_cast<int>(now.wYear),
+               static_cast<int>(now.wMonth), static_cast<int>(now.wDay),
+               weekdayNames[weekday]);
+    wchar_t shortDate[64] = {};
+    swprintf_s(shortDate, L"%d月%d日 星期%s", static_cast<int>(now.wMonth),
+               static_cast<int>(now.wDay), weekdayNames[weekday]);
+
+    const RectF primary = PrimaryRectF();
+    const auto drawText = [this, &graphics](
+                              const std::wstring& text, const RectF& rect,
+                              int pixelSize, bool bold, bool italic, bool cjk,
+                              StringAlignment align, BYTE alpha) {
+        Font* font = GetFont(std::max(6, pixelSize), bold, italic, cjk);
+        StringFormat format;
+        format.SetAlignment(align);
+        format.SetLineAlignment(StringAlignmentCenter);
+        format.SetFormatFlags(StringFormatFlagsNoWrap);
+        const REAL shadowOffset = std::max(1.0f, 1.6f * m_scale);
+        SolidBrush shadow(Color(110, 0, 0, 0));
+        const RectF shadowRect(rect.X + shadowOffset, rect.Y + shadowOffset,
+                               rect.Width, rect.Height);
+        graphics.DrawString(text.c_str(), static_cast<INT>(text.length()), font,
+                            shadowRect, &format, &shadow);
+        SolidBrush brush(Color(alpha, 248, 247, 244));
+        graphics.DrawString(text.c_str(), static_cast<INT>(text.length()), font,
+                            rect, &format, &brush);
+    };
+
+    switch (m_backgroundMode)
+    {
+    case SCREENSAVER_BG_SOLID:
+    {
+        const REAL centerX = primary.X + primary.Width * 0.5f;
+        const REAL top =
+            primary.Y + static_cast<REAL>(RoundToInt(kSolidTimeTopDip * m_scale));
+        drawText(timeText,
+                 RectF(centerX - 230.0f * m_scale, top, 460.0f * m_scale,
+                       40.0f * m_scale),
+                 RoundToInt(30.0f * m_scale), false, false, false,
+                 StringAlignmentCenter, 235);
+        drawText(shortDate,
+                 RectF(centerX - 230.0f * m_scale, top + 36.0f * m_scale,
+                       460.0f * m_scale, 22.0f * m_scale),
+                 RoundToInt(12.5f * m_scale), false, false, true,
+                 StringAlignmentCenter, 185);
+        break;
+    }
+    case SCREENSAVER_BG_GRADIENT:
+    {
+        const REAL right =
+            primary.X + primary.Width -
+            static_cast<REAL>(RoundToInt(kGradientTimeMarginDip * m_scale));
+        const REAL top = primary.Y +
+                         static_cast<REAL>(RoundToInt(kGradientTimeMarginDip *
+                                                      m_scale));
+        drawText(timeText,
+                 RectF(right - 420.0f * m_scale, top, 420.0f * m_scale,
+                       46.0f * m_scale),
+                 RoundToInt(34.0f * m_scale), false, true, false,
+                 StringAlignmentFar, 236);
+        drawText(shortDate,
+                 RectF(right - 420.0f * m_scale, top + 42.0f * m_scale,
+                       420.0f * m_scale, 22.0f * m_scale),
+                 RoundToInt(12.5f * m_scale), false, false, true,
+                 StringAlignmentFar, 190);
+        break;
+    }
+    case SCREENSAVER_BG_LANDSCAPE:
+    default:
+    {
+        const REAL left =
+            primary.X + static_cast<REAL>(RoundToInt(kLandscapeTimeMarginDip *
+                                                     m_scale));
+        const REAL top = primary.Y +
+                         static_cast<REAL>(RoundToInt(kLandscapeTimeMarginDip *
+                                                      m_scale));
+        drawText(timeText,
+                 RectF(left, top, 600.0f * m_scale, 64.0f * m_scale),
+                 RoundToInt(46.0f * m_scale), false, false, false,
+                 StringAlignmentNear, 240);
+        drawText(dateText,
+                 RectF(left, top + 60.0f * m_scale, 620.0f * m_scale,
+                       26.0f * m_scale),
+                 RoundToInt(16.0f * m_scale), false, false, true,
+                 StringAlignmentNear, 228);
+        break;
+    }
+    }
 }
 
 void RestOverlay::DrawExtendButton(Graphics& graphics)
@@ -1903,7 +2068,7 @@ void RestOverlay::DrawProgress(Graphics& graphics)
     Font* font = GetFont(std::max(6, RoundToInt(12.5f * m_scale)), false, false,
                          true);
     StringFormat format;
-    format.SetAlignment(StringAlignmentCenter);
+    format.SetAlignment(StringAlignmentFar);
     format.SetLineAlignment(StringAlignmentCenter);
     format.SetFormatFlags(StringFormatFlagsNoWrap);
     const RectF text(static_cast<REAL>(textRect.left),
@@ -1942,9 +2107,11 @@ void RestOverlay::ComposeFrame()
     m_graphics->Clear(Color(0, 0, 0, 0));
     m_graphics->DrawImage(m_background, 0, 0, m_widthPx, m_heightPx);
     DrawQuote(*m_graphics);
-    DrawCloseButton(*m_graphics);
+    DrawTimeBlock(*m_graphics);
     DrawExtendButton(*m_graphics);
     DrawProgress(*m_graphics);
+    DrawSkipButton(*m_graphics);
+    m_lastMinuteKey = CurrentMinuteKey();
 }
 
 void RestOverlay::PresentFull(BYTE constantAlpha)
@@ -2104,13 +2271,21 @@ void RestOverlay::PresentRegion(const RECT& dirty)
     UpdateLayeredWindowIndirect(m_hwnd, &info);
 }
 
-void RestOverlay::UpdateCloseRegion()
+void RestOverlay::UpdateSkipRegion()
 {
-    const RECT region = OffsetRectCopy(CloseRect(), -8, -8);
-    RECT expanded = region;
-    InflateRect(&expanded, 10, 10);
+    RECT expanded = SkipRect();
+    InflateRect(&expanded, RoundToInt(8.0f * m_scale),
+                RoundToInt(8.0f * m_scale));
     RestoreRegion(*m_graphics, expanded);
-    DrawCloseButton(*m_graphics);
+    DrawSkipButton(*m_graphics);
+    PresentRegion(expanded);
+}
+
+void RestOverlay::UpdateTimeRegion()
+{
+    RECT expanded = TimeRect();
+    RestoreRegion(*m_graphics, expanded);
+    DrawTimeBlock(*m_graphics);
     PresentRegion(expanded);
 }
 
@@ -2128,6 +2303,8 @@ void RestOverlay::UpdateProgressRegion()
     RECT region = ProgressRect();
     RestoreRegion(*m_graphics, region);
     DrawProgress(*m_graphics);
+    // The inflated progress region overlaps the left edge of the "跳过" button.
+    DrawSkipButton(*m_graphics);
     PresentRegion(region);
 }
 
@@ -2139,7 +2316,7 @@ void RestOverlay::UpdateHover(POINT point)
     const int previous = m_hovered;
     m_hovered = hit;
     if (previous == 1 || hit == 1)
-        UpdateCloseRegion();
+        UpdateSkipRegion();
     if (previous == 2 || hit == 2)
         UpdateExtendRegion();
 }
@@ -2150,7 +2327,7 @@ int RestOverlay::HitTest(POINT point) const
         return point.x >= rect.left && point.x < rect.right &&
                point.y >= rect.top && point.y < rect.bottom;
     };
-    if (inside(CloseRect()))
+    if (inside(SkipRect()))
         return 1;
     if (inside(ExtendRect()))
         return 2;
@@ -2165,7 +2342,7 @@ void RestOverlay::OnMouseLeave()
     const int previous = m_hovered;
     m_hovered = 0;
     if (previous == 1)
-        UpdateCloseRegion();
+        UpdateSkipRegion();
     if (previous == 2)
         UpdateExtendRegion();
 }
@@ -2181,7 +2358,7 @@ void RestOverlay::OnLButtonDown(POINT point)
     m_pressed = hit;
     SetCapture(m_hwnd);
     if (hit == 1)
-        UpdateCloseRegion();
+        UpdateSkipRegion();
     else
         UpdateExtendRegion();
 }
@@ -2214,7 +2391,7 @@ void RestOverlay::OnLButtonUp(POINT point)
         }
     }
     if (pressed == 1)
-        UpdateCloseRegion();
+        UpdateSkipRegion();
     if (pressed == 2)
         UpdateExtendRegion();
 }
@@ -2231,6 +2408,12 @@ void RestOverlay::OnClockTick()
     }
     if (m_fadeActive)
         return; // the progress text is already correct in the first frame
+    const ULONGLONG minuteKey = CurrentMinuteKey();
+    if (minuteKey != m_lastMinuteKey)
+    {
+        m_lastMinuteKey = minuteKey;
+        UpdateTimeRegion();
+    }
     const int remaining =
         static_cast<int>((m_endTick - now + 999ULL) / 1000ULL);
     if (remaining != m_lastRemainingSeconds)
@@ -2302,7 +2485,15 @@ bool RestOverlay::Create(HWND owner, int backgroundMode)
 
     RenderBackground();
     ComposeFrame();
-    PresentFull(0);
+    if (g_testMode)
+    {
+        // Deterministic screenshots: no fade-in for the internal test hooks.
+        PresentFull(255);
+    }
+    else
+    {
+        PresentFull(0);
+    }
 
     ShowWindow(m_hwnd, SW_SHOWNOACTIVATE);
     SetWindowPos(m_hwnd, HWND_TOPMOST, m_origin.x, m_origin.y, m_widthPx,
@@ -2311,9 +2502,13 @@ bool RestOverlay::Create(HWND owner, int backgroundMode)
     const ULONGLONG now = NowMs();
     m_startTick = now;
     m_endTick = now + static_cast<ULONGLONG>(DurationSeconds()) * 1000ULL;
-    m_fadeStartTick = now;
-    m_fadeActive = true;
-    SetTimer(m_hwnd, kFadeTimerId, kFadeIntervalMs, nullptr);
+    m_currentAlpha = 255;
+    if (!g_testMode)
+    {
+        m_fadeStartTick = now;
+        m_fadeActive = true;
+        SetTimer(m_hwnd, kFadeTimerId, kFadeIntervalMs, nullptr);
+    }
     SetTimer(m_hwnd, kClockTimerId, kClockIntervalMs, nullptr);
     return true;
 }
@@ -2438,7 +2633,7 @@ LRESULT RestOverlay::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
             const int pressed = m_pressed;
             m_pressed = 0;
             if (pressed == 1)
-                UpdateCloseRegion();
+                UpdateSkipRegion();
             if (pressed == 2)
                 UpdateExtendRegion();
         }
