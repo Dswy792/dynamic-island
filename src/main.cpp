@@ -20,6 +20,7 @@
 #include "recording_dialogs.h"
 #include "rendering.h"
 #include "resource.h"
+#include "screensaver.h"
 #include "settings.h"
 #include "settings_dialog.h"
 #include "theme.h"
@@ -43,6 +44,7 @@ bool s_dragMoved = false;
 POINT s_dragStartCursor = {};
 RECT s_dragStartCapsule = {};
 bool s_hiddenByFullscreen = false;
+bool s_hiddenByScreensaver = false;
 ULONGLONG s_lastInsideTick = 0;
 int s_contentTickCount = 0;
 UINT s_taskbarCreatedMessage = 0;
@@ -443,6 +445,33 @@ void UpdateAutoHide()
     GetCursorPos(&cursor);
 
     UpdateHoverLeavePending();
+
+    // The screensaver overlay must cover everything: hide the island (and its
+    // sub-islands) while it is active, and restore it when the overlay closes.
+    if (IsScreensaverActive())
+    {
+        if (!IsIslandHiddenTarget())
+        {
+            s_hiddenByScreensaver = true;
+            s_hovering = false;
+            SetIslandHoverTarget(false);
+            SetIslandHiddenTarget(true);
+        }
+        return;
+    }
+    if (s_hiddenByScreensaver)
+    {
+        s_hiddenByScreensaver = false;
+        SetIslandHiddenTarget(false);
+    }
+    // The 10-second "entering screensaver" notice lives right below the island;
+    // keep the island visible while it is shown.
+    if (IsScreensaverNoticeVisible())
+    {
+        RevealIsland();
+        s_lastInsideTick = now;
+        return;
+    }
 
     const bool gameFullscreen = IsGameFullscreenActive();
     const bool otherFullscreen = !gameFullscreen && IsFullscreenAppActive();
@@ -1382,6 +1411,7 @@ LRESULT CALLBACK IslandWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
             ++s_contentTickCount;
             if ((s_contentTickCount % 25) == 0)
                 RefreshSystemThemeCache();
+            ScreensaverOnTick();
             RenderIslandFrame(false);
             return 0;
         case kTimerAutoHide:
@@ -1637,6 +1667,7 @@ LRESULT CALLBACK IslandWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
         s_countdownActive = false;
         s_recordingPulseTimerRunning = false;
         s_toastTimerRunning = false;
+        ShutdownScreensaver();
         // Best effort: let the recorder finalise the audio file on exit.
         if (CurrentRecorderState() != RecorderState::Idle)
             RecorderStop();
@@ -1723,6 +1754,7 @@ void ApplySettingsAndRefresh()
     FinishIslandAnimation();
     RefreshRecordingVisual(true);
     UpdateTrayIcon();
+    ScreensaverApplySettings();
     RefreshSettingsDialog();
 }
 
@@ -1904,6 +1936,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     InitIslandAnimation(g_hwnd);
     InitIslandRenderer(g_hwnd);
     SetFeatureRowInfo(kEnabledFeatureSlots, -1);
+    InitScreensaver(g_hwnd);
 
     s_taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
     s_lastInsideTick = GetTickCount64();

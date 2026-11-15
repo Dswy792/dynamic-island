@@ -1,4 +1,4 @@
-# Dynamic Island v5.4.2 - Uninstall Script
+# Dynamic Island v5.5.0 - Uninstall Script
 # Removes the built program, build artifacts, the auto-start entry and the
 # HKCU\SOFTWARE\DynamicIsland settings of the current user.
 # User data is never touched: the recordings/ folder (meeting-note text output,
@@ -137,15 +137,19 @@ Write-Host ""
 # Step 3: Delete registry configuration
 Write-Host "Step 3: Deleting registry configuration..." -ForegroundColor Yellow
 
-# Dynamic Island v5.4.2 stores the complete settings schema under this key
+# Dynamic Island v5.5.0 stores the complete settings schema under this key
 # (SettingsVersion = 2, unchanged in v5.2):
 #   Use24Hour, ShowSeconds, ShowAmPm, ShowDate, ShowYear, ShowWeekday,
 #   DateFormat, Theme, WindowSize, Position, CustomX, CustomY, AutoHide,
 #   HideDelaySeconds, HideOnFullscreen, FontSize, BoldFont, Opacity,
 #   NotifyEnable, NotifyShowContent, NotifyWeChat, NotifyQQ, NotifyPeekSeconds,
-#   RecordSaveDir, RecordAutoSummary, AiApiBase, AiApiKey, AiSttModel, AiSummaryModel
+#   RecordSaveDir, RecordAutoSummary, AiApiBase, AiApiKey, AiSttModel, AiSummaryModel,
+#   ScreensaverEnable, ScreensaverIntervalMinutes, ScreensaverDurationSeconds,
+#   ScreensaverPostponeMinutes, ScreensaverExtendMinutes, ScreensaverBlockInGame,
+#   ScreensaverBackground
 # (v5.2 added the Notify* message-reminder options; v5.4 added the Record* / Ai*
-#  meeting-note options; NotifyPeekSeconds: 0 =
+#  meeting-note options; v5.5 added the Screensaver* rest-reminder options;
+#  NotifyPeekSeconds: 0 =
 #  persistent sub-islands (v5.2.1 default), 1..10 = auto-collapse seconds. The
 #  whole key is removed below, so no per-value cleanup is needed.)
 # The auto-start preference is not stored here: it lives in the Run key that is

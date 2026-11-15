@@ -84,6 +84,29 @@ constexpr int kRecordingTwoHoursSeconds = 7200;
 constexpr int kRecordingUnlimitedSeconds = 0; // 0 = no limit
 constexpr int kRecordingCountdownSeconds = 3;
 
+// Screensaver / rest reminder (v5.5)
+constexpr int kScreensaverIntervalMinMinutes = 5;
+constexpr int kScreensaverIntervalMaxMinutes = 240;
+constexpr int kScreensaverIntervalDefaultMinutes = 30;
+constexpr int kScreensaverDurationMinSeconds = 15;
+constexpr int kScreensaverDurationMaxSeconds = 1800;
+constexpr int kScreensaverDurationDefaultSeconds = 60;
+constexpr int kScreensaverPostponeMinMinutes = 1;
+constexpr int kScreensaverPostponeMaxMinutes = 120;
+constexpr int kScreensaverPostponeDefaultMinutes = 10;
+constexpr int kScreensaverExtendMinMinutes = 1;
+constexpr int kScreensaverExtendMaxMinutes = 60;
+constexpr int kScreensaverExtendDefaultMinutes = 5;
+constexpr int kScreensaverNoticeSeconds = 10;
+
+enum ScreensaverBackground
+{
+    SCREENSAVER_BG_LANDSCAPE = 0,
+    SCREENSAVER_BG_SOLID = 1,
+    SCREENSAVER_BG_GRADIENT = 2,
+    SCREENSAVER_BG_COUNT = 3
+};
+
 constexpr int kTooltipRefreshIntervalMs = 20000;
 constexpr int kAutoHideCheckIntervalMs = 100;
 constexpr int kContentCheckIntervalMs = 200;
@@ -128,6 +151,15 @@ struct AppSettings
     std::wstring aiApiKey;
     std::wstring aiSttModel = L"whisper-1";
     std::wstring aiSummaryModel = L"gpt-4o-mini";
+
+    // Screensaver / rest reminder (v5.5, built-in full-screen overlay).
+    bool screensaverEnable = false;
+    int screensaverIntervalMinutes = kScreensaverIntervalDefaultMinutes;
+    int screensaverDurationSeconds = kScreensaverDurationDefaultSeconds;
+    int screensaverPostponeMinutes = kScreensaverPostponeDefaultMinutes;
+    int screensaverExtendMinutes = kScreensaverExtendDefaultMinutes;
+    bool screensaverBlockInGame = true;
+    int screensaverBackground = SCREENSAVER_BG_LANDSCAPE;
 };
 
 extern AppSettings g_settings;

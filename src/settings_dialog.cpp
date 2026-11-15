@@ -6,10 +6,11 @@
 // (the same technique the island itself uses).  GDI+ is initialised once by
 // main(); this file never calls GdiplusStartup/GdiplusShutdown.
 //
-// v5.4 layout: a Windows 11 style left navigation pane with three pages
+// v5.5 layout: a Windows 11 style left navigation pane with four pages
 //   "时间与外观" - clock/date/appearance/behaviour + live island preview
 //   "微信与 QQ"  - message notification options
 //   "会议与视频纪要" - recording folder, auto-summary and AI endpoint fields
+//   "屏保与休息" - screensaver timing, postpone/extend and background style
 // The right-hand page is fully custom-painted, including single-line text
 // editors (caret, typing, Backspace/Delete, arrows, Home/End, Ctrl+V/C) for the
 // AI fields because the window has no native child controls.
@@ -84,7 +85,7 @@ constexpr float kNavItemMarginDip = 12.0f;
 constexpr float kNavItemHeightDip = 40.0f;
 constexpr float kNavItemGapDip = 4.0f;
 constexpr float kNavItemsTopDip = 16.0f;
-constexpr int kPageCount = 3;
+constexpr int kPageCount = 4;
 
 // --- Right content page ----------------------------------------------------
 constexpr float kContentPaddingDip = 18.0f;
@@ -166,6 +167,18 @@ constexpr float kRecordCardHeightDip = 144.0f;
 // 36 title/row offset + 4 rows (34) + 3 gaps (4 each) + 14 bottom padding.
 constexpr float kAiCardHeightDip = 198.0f;
 constexpr float kPageHintHeightDip = 48.0f;
+
+// --- Page 4: screensaver & rest -------------------------------------------
+constexpr float kScreenCardHeightDip = 258.0f;
+constexpr float kScreenBgCardHeightDip = 84.0f; // title + one row + 18 bottom
+constexpr float kScreenRowTopDip = 34.0f;
+constexpr float kScreenRowHeightDip = 32.0f;
+constexpr float kScreenRowStepDip = 36.0f; // row height + 4 DIP gap
+constexpr float kScreenBgRowTopDip = 34.0f;
+constexpr float kScreenHintHeightDip = 44.0f;
+constexpr int kScreenDurationMinMinutes = 1;
+constexpr int kScreenDurationMaxMinutes = 30;
+constexpr int kScreenIntervalStepMinutes = 5;
 constexpr float kRecordLabelWidthDip = 80.0f;
 constexpr float kAiLabelWidthDip = 110.0f;
 constexpr float kAiFieldGapDip = 8.0f;
@@ -196,10 +209,11 @@ enum ControlId
     kIdApply,
     kIdOk,
 
-    // Left navigation (v5.4). Keep these three contiguous: they map to pages.
+    // Left navigation. Keep these contiguous: they map to pages.
     kIdNavTime,
     kIdNavNotify,
     kIdNavMeeting,
+    kIdNavScreensaver,
 
     kIdUse24Hour,
     kIdShowSeconds,
@@ -256,6 +270,21 @@ enum ControlId
     kIdAiSummary,
     // Reveal/hide the API key (not part of the four text fields).
     kIdAiKeyReveal,
+
+    // Screensaver & rest page (v5.5).
+    kIdScreenEnable,
+    kIdScreenIntervalMinus,
+    kIdScreenIntervalPlus,
+    kIdScreenDurationMinus,
+    kIdScreenDurationPlus,
+    kIdScreenPostponeMinus,
+    kIdScreenPostponePlus,
+    kIdScreenExtendMinus,
+    kIdScreenExtendPlus,
+    kIdScreenBlockGame,
+    kIdScreenBgLandscape,
+    kIdScreenBgSolid,
+    kIdScreenBgGradient,
 };
 
 // ---------------------------------------------------------------------------
@@ -606,7 +635,7 @@ struct DialogLayout
 
     // v5.4 navigation pane and page area.
     RectF navPane;
-    RectF navItems[3];
+    RectF navItems[kPageCount];
     RectF contentArea;
     RectF pageHeader;
 
@@ -654,6 +683,18 @@ struct DialogLayout
     RectF recordHint;
     RectF aiFieldRows[4];
     RectF aiFieldRects[4];
+
+    // Page 4: screensaver & rest.
+    RectF screenCard;
+    RectF screenRows[6];
+    RectF screenIntervalStepper;
+    RectF screenDurationStepper;
+    RectF screenPostponeStepper;
+    RectF screenExtendStepper;
+    RectF screenBgCard;
+    RectF screenBgRow;
+    RectF screenBgPills;
+    RectF screenHint;
 
     RectF hint;
     RectF cancelButton;
@@ -857,7 +898,8 @@ int ComputeFieldScrollStart(Painter& painter, const std::wstring& display,
     return start;
 }
 
-void DrawNavIcon(Painter& painter, const RectF& rect, int page, COLORREF color)
+void DrawNavIcon(Painter& painter, const RectF& rect, int page, COLORREF color,
+                 COLORREF background)
 {
     const float scale = painter.Scale();
     switch (page)
@@ -886,7 +928,7 @@ void DrawNavIcon(Painter& painter, const RectF& rect, int page, COLORREF color)
                      color, 1.4f);
         break;
     }
-    default: // waveform bars (meeting notes)
+    case 2: // waveform bars (meeting notes)
     {
         const float left = rect.X + 2.0f * scale;
         const float baseY = rect.Y + rect.Height - 2.0f * scale;
@@ -898,6 +940,16 @@ void DrawNavIcon(Painter& painter, const RectF& rect, int page, COLORREF color)
                                         baseY - height, 2.0f * scale, height),
                                   1.0f * scale, color);
         }
+        break;
+    }
+    default: // crescent moon (screensaver & rest)
+    {
+        painter.FillEllipse(rect, color);
+        const float cutout = rect.Width * 0.66f;
+        painter.FillEllipse(
+            RectF(rect.X + rect.Width * 0.34f, rect.Y - rect.Height * 0.10f,
+                  cutout, cutout),
+            background);
         break;
     }
     }
@@ -1093,7 +1145,7 @@ void DrawToggleRow(Painter& painter, const RectF& row, const std::wstring& label
 void DrawSegmentedRow(Painter& painter, const RectF& row,
                       const std::wstring& label, const RectF& container,
                       const std::vector<std::wstring>& labels, int selected,
-                      const int* ids)
+                      const int* ids, bool rowEnabled = true)
 {
     if (!painter.Visible(row))
         return;
@@ -1105,7 +1157,8 @@ void DrawSegmentedRow(Painter& painter, const RectF& row,
 
     const RectF labelRect(row.X, row.Y, container.X - row.X - 8.0f * scale,
                           row.Height);
-    painter.Text(label, labelRect, 12.5f, false, palette.panelText);
+    painter.Text(label, labelRect, 12.5f, false,
+                 rowEnabled ? palette.panelText : DisabledTextColor(palette));
 
     painter.FillRoundRect(container, 8.0f * scale, RecessedColor(palette));
 
@@ -1115,21 +1168,30 @@ void DrawSegmentedRow(Painter& painter, const RectF& row,
             SegmentRectOf(container, index, count, kSegmentGapDip * scale);
         const RectF pill = InsetRectF(segment, 2.0f * scale);
         const bool isSelected = (index == selected);
-        const bool isHovered = painter.Hovered(ids[index]);
+        const bool isHovered = rowEnabled && painter.Hovered(ids[index]);
 
         if (isSelected)
-            painter.FillRoundRect(pill, 6.0f * scale, palette.accent);
+        {
+            painter.FillRoundRect(
+                pill, 6.0f * scale,
+                rowEnabled ? palette.accent
+                           : BlendColor(palette.accent, palette.panelSurface, 150));
+        }
         else if (isHovered)
+        {
             painter.FillRoundRect(pill, 6.0f * scale, palette.panelSurfaceHover);
+        }
 
         COLORREF color = palette.panelTextSecondary;
         if (isSelected)
             color = palette.accentText;
         else if (isHovered)
             color = palette.panelText;
+        if (!rowEnabled)
+            color = DisabledTextColor(palette);
 
         painter.Text(labels[static_cast<size_t>(index)], segment, 11.5f,
-                     isSelected, color, 255, StringAlignmentCenter,
+                     isSelected && rowEnabled, color, 255, StringAlignmentCenter,
                      StringAlignmentCenter, true);
     }
 }
@@ -1701,6 +1763,7 @@ private:
     void DrawTimeAppearancePage(Painter& painter);
     void DrawNotificationsPage(Painter& painter);
     void DrawMeetingPage(Painter& painter);
+    void DrawScreensaverPage(Painter& painter);
     void DrawFooter(Painter& painter);
     void SetPage(int page);
     void RequestPaint();
@@ -2243,6 +2306,40 @@ void SettingsWindow::BuildLayout()
             kAiFieldHeightDip * scale);
     }
 
+    // --- Page 4: screensaver & rest ----------------------------------------
+    layout.screenCard = PanelRect(kContentLeftDip, kPageContentTopDip,
+                                  kPageWidthDip, kScreenCardHeightDip);
+    for (int index = 0; index < 6; ++index)
+    {
+        layout.screenRows[index] =
+            CardRow(layout.screenCard,
+                    kScreenRowTopDip +
+                        static_cast<float>(index) * kScreenRowStepDip,
+                    kScreenRowHeightDip);
+    }
+    layout.screenIntervalStepper =
+        RightAligned(layout.screenRows[1], kStepperWidthDip, kStepperHeightDip);
+    layout.screenDurationStepper =
+        RightAligned(layout.screenRows[2], kStepperWidthDip, kStepperHeightDip);
+    layout.screenPostponeStepper =
+        RightAligned(layout.screenRows[3], kStepperWidthDip, kStepperHeightDip);
+    layout.screenExtendStepper =
+        RightAligned(layout.screenRows[4], kStepperWidthDip, kStepperHeightDip);
+
+    layout.screenBgCard = PanelRect(
+        kContentLeftDip,
+        kPageContentTopDip + kScreenCardHeightDip + kCardGapDip, kPageWidthDip,
+        kScreenBgCardHeightDip);
+    layout.screenBgRow =
+        CardRow(layout.screenBgCard, kScreenBgRowTopDip, kScreenRowHeightDip);
+    layout.screenBgPills =
+        RightAligned(layout.screenBgRow, kPillGroupWidthDip, kPillHeightDip);
+    layout.screenHint = RectF(
+        layout.screenBgCard.X,
+        layout.screenBgCard.Y + layout.screenBgCard.Height +
+            kCardGapDip * scale,
+        layout.screenBgCard.Width, kScreenHintHeightDip * scale);
+
     // The taller left-column cards distribute their extra height between the
     // rows (row heights/labels stay the same), keeping the old bottom padding.
     const float clockRowGap =
@@ -2426,13 +2523,66 @@ void SettingsWindow::BuildLayout()
                        m_notificationAccess != NotificationAccess::Allowed);
         }
     }
-    else
+    else if (m_page == 2)
     {
         AddControl(kIdRecordBrowse, layout.recordBrowseButton, true);
         AddControl(kIdRecordDefault, layout.recordDefaultButton, true);
         AddControl(kIdRecordAutoSummary, layout.autoSummaryRow, true);
         for (int index = 0; index < kTextFieldCount; ++index)
             AddControl(kIdAiBase + index, layout.aiFieldRects[index], true);
+    }
+    else
+    {
+        // Page 4: screensaver & rest. Everything except the master toggle is
+        // disabled (grey + not clickable) while 启用屏保 is off.
+        const bool on = m_pending.screensaverEnable;
+        AddControl(kIdScreenEnable, layout.screenRows[0], true);
+
+        const int interval = m_pending.screensaverIntervalMinutes;
+        AddControl(kIdScreenIntervalMinus,
+                   StepperPartRect(layout.screenIntervalStepper, 0, scale),
+                   on && interval > kScreensaverIntervalMinMinutes);
+        AddControl(kIdScreenIntervalPlus,
+                   StepperPartRect(layout.screenIntervalStepper, 2, scale),
+                   on && interval < kScreensaverIntervalMaxMinutes);
+
+        const int durationMinutes = ClampIntValue(
+            (m_pending.screensaverDurationSeconds + 30) / 60,
+            kScreenDurationMinMinutes, kScreenDurationMaxMinutes);
+        AddControl(kIdScreenDurationMinus,
+                   StepperPartRect(layout.screenDurationStepper, 0, scale),
+                   on && durationMinutes > kScreenDurationMinMinutes);
+        AddControl(kIdScreenDurationPlus,
+                   StepperPartRect(layout.screenDurationStepper, 2, scale),
+                   on && durationMinutes < kScreenDurationMaxMinutes);
+
+        const int postpone = m_pending.screensaverPostponeMinutes;
+        AddControl(kIdScreenPostponeMinus,
+                   StepperPartRect(layout.screenPostponeStepper, 0, scale),
+                   on && postpone > kScreensaverPostponeMinMinutes);
+        AddControl(kIdScreenPostponePlus,
+                   StepperPartRect(layout.screenPostponeStepper, 2, scale),
+                   on && postpone < kScreensaverPostponeMaxMinutes);
+
+        const int extend = m_pending.screensaverExtendMinutes;
+        AddControl(kIdScreenExtendMinus,
+                   StepperPartRect(layout.screenExtendStepper, 0, scale),
+                   on && extend > kScreensaverExtendMinMinutes);
+        AddControl(kIdScreenExtendPlus,
+                   StepperPartRect(layout.screenExtendStepper, 2, scale),
+                   on && extend < kScreensaverExtendMaxMinutes);
+
+        AddControl(kIdScreenBlockGame, layout.screenRows[5], on);
+
+        const int bgIds[3] = {kIdScreenBgLandscape, kIdScreenBgSolid,
+                              kIdScreenBgGradient};
+        for (int index = 0; index < 3; ++index)
+        {
+            AddControl(bgIds[index],
+                       SegmentRectOf(layout.screenBgPills, index, 3,
+                                     kSegmentGapDip * scale),
+                       on);
+        }
     }
 
     AddControl(kIdExitApp, layout.exitButton, true);
@@ -2458,6 +2608,9 @@ void SettingsWindow::DrawScene(Painter& painter)
     case 2:
         DrawMeetingPage(painter);
         break;
+    case 3:
+        DrawScreensaverPage(painter);
+        break;
     default:
         break;
     }
@@ -2481,7 +2634,7 @@ void SettingsWindow::DrawNavigation(Painter& painter)
                  palette.panelBorder, 1.0f);
 
     static const wchar_t* const kNavLabels[kPageCount] = {
-        L"时间与外观", L"微信与 QQ", L"会议与视频纪要"};
+        L"时间与外观", L"微信与 QQ", L"会议与视频纪要", L"屏保与休息"};
     for (int index = 0; index < kPageCount; ++index)
     {
         const RectF& item = layout.navItems[index];
@@ -2512,7 +2665,7 @@ void SettingsWindow::DrawNavigation(Painter& painter)
                     RectF(item.X + 16.0f * scale,
                           item.Y + (item.Height - 16.0f * scale) * 0.5f,
                           16.0f * scale, 16.0f * scale),
-                    index, contentColor);
+                    index, contentColor, fill);
         painter.Text(kNavLabels[index],
                      RectF(item.X + 40.0f * scale, item.Y,
                            item.Width - 48.0f * scale, item.Height),
@@ -2530,11 +2683,12 @@ void SettingsWindow::DrawPageHeader(Painter& painter)
         return;
 
     static const wchar_t* const kTitles[kPageCount] = {
-        L"时间与外观", L"微信与 QQ", L"会议与视频纪要"};
+        L"时间与外观", L"微信与 QQ", L"会议与视频纪要", L"屏保与休息"};
     static const wchar_t* const kSubtitles[kPageCount] = {
         L"时钟、日期、外观与行为",
         L"消息提醒、显示内容与子岛停留时长",
-        L"系统音频实时转写与 AI 纪要（OpenAI 兼容接口）"};
+        L"系统音频实时转写与 AI 纪要（OpenAI 兼容接口）",
+        L"全屏屏保、休息提醒与背景样式"};
     const int page = ClampIntValue(m_page, 0, kPageCount - 1);
     painter.Text(kTitles[page],
                  RectF(layout.pageHeader.X, layout.pageHeader.Y,
@@ -2787,6 +2941,83 @@ void SettingsWindow::DrawMeetingPage(Painter& painter)
                  StringAlignmentNear, StringAlignmentCenter, true);
 }
 
+void SettingsWindow::DrawScreensaverPage(Painter& painter)
+{
+    const DialogLayout& layout = m_layout;
+    const ThemePalette& palette = painter.Palette();
+    const bool on = m_pending.screensaverEnable;
+
+    // --- Card 1: screensaver & rest ---------------------------------------
+    DrawCard(painter, layout.screenCard, L"屏保与休息");
+    DrawToggleRow(painter, layout.screenRows[0], L"启用屏保", on, true,
+                  kIdScreenEnable);
+
+    const int interval =
+        ClampIntValue(m_pending.screensaverIntervalMinutes,
+                      kScreensaverIntervalMinMinutes,
+                      kScreensaverIntervalMaxMinutes);
+    DrawStepperRow(painter, layout.screenRows[1], layout.screenIntervalStepper,
+                   L"休息间隔", ToWString(interval) + L" 分钟",
+                   on && interval > kScreensaverIntervalMinMinutes,
+                   on && interval < kScreensaverIntervalMaxMinutes,
+                   kIdScreenIntervalMinus, kIdScreenIntervalPlus, on);
+
+    const int durationMinutes = ClampIntValue(
+        (m_pending.screensaverDurationSeconds + 30) / 60,
+        kScreenDurationMinMinutes, kScreenDurationMaxMinutes);
+    DrawStepperRow(painter, layout.screenRows[2], layout.screenDurationStepper,
+                   L"屏保时长", ToWString(durationMinutes) + L" 分钟",
+                   on && durationMinutes > kScreenDurationMinMinutes,
+                   on && durationMinutes < kScreenDurationMaxMinutes,
+                   kIdScreenDurationMinus, kIdScreenDurationPlus, on);
+
+    const int postpone =
+        ClampIntValue(m_pending.screensaverPostponeMinutes,
+                      kScreensaverPostponeMinMinutes,
+                      kScreensaverPostponeMaxMinutes);
+    DrawStepperRow(painter, layout.screenRows[3], layout.screenPostponeStepper,
+                   L"暂不进入后延后", ToWString(postpone) + L" 分钟",
+                   on && postpone > kScreensaverPostponeMinMinutes,
+                   on && postpone < kScreensaverPostponeMaxMinutes,
+                   kIdScreenPostponeMinus, kIdScreenPostponePlus, on);
+
+    const int extend =
+        ClampIntValue(m_pending.screensaverExtendMinutes,
+                      kScreensaverExtendMinMinutes,
+                      kScreensaverExtendMaxMinutes);
+    DrawStepperRow(painter, layout.screenRows[4], layout.screenExtendStepper,
+                   L"延长时间", ToWString(extend) + L" 分钟",
+                   on && extend > kScreensaverExtendMinMinutes,
+                   on && extend < kScreensaverExtendMaxMinutes,
+                   kIdScreenExtendMinus, kIdScreenExtendPlus, on);
+
+    DrawToggleRow(painter, layout.screenRows[5], L"游戏运行时暂停屏保",
+                  m_pending.screensaverBlockInGame, on, kIdScreenBlockGame);
+
+    // --- Card 2: background style -----------------------------------------
+    DrawCard(painter, layout.screenBgCard, L"屏保背景");
+    const std::vector<std::wstring> backgroundLabels = {L"风景", L"纯色", L"渐变"};
+    const int backgroundIds[3] = {kIdScreenBgLandscape, kIdScreenBgSolid,
+                                  kIdScreenBgGradient};
+    DrawSegmentedRow(painter, layout.screenBgRow, L"背景样式",
+                     layout.screenBgPills, backgroundLabels,
+                     m_pending.screensaverBackground, backgroundIds, on);
+
+    // --- Hints -------------------------------------------------------------
+    painter.Text(
+        L"屏保只覆盖屏幕，不暂停任何程序；进入前 10 秒会在灵动岛下方提示，可立即进入或暂不进入。",
+        RectF(layout.screenHint.X, layout.screenHint.Y, layout.screenHint.Width,
+              layout.screenHint.Height * 0.5f),
+        9.5f, false, palette.panelTextSecondary, 255, StringAlignmentNear,
+        StringAlignmentCenter, true);
+    painter.Text(L"右上角 × 或 Esc 可提前退出；游戏中不会启动（可关闭该开关）。",
+                 RectF(layout.screenHint.X,
+                       layout.screenHint.Y + layout.screenHint.Height * 0.5f,
+                       layout.screenHint.Width, layout.screenHint.Height * 0.5f),
+                 9.5f, false, palette.panelTextSecondary, 255,
+                 StringAlignmentNear, StringAlignmentCenter, true);
+}
+
 void SettingsWindow::DrawFooter(Painter& painter)
 {
     const DialogLayout& layout = m_layout;
@@ -2892,6 +3123,18 @@ void SettingsWindow::RepaintAfterAction(int id)
         return;
     }
 
+    // Toggling 启用屏保 enables/disables controls in BOTH page-4 cards.
+    if (id == kIdScreenEnable)
+    {
+        RECT first = ToPixelRect(m_layout.screenCard);
+        InflateRect(&first, kDirtyMarginPx, kDirtyMarginPx);
+        RequestPaintRect(first);
+        RECT second = ToPixelRect(m_layout.screenBgCard);
+        InflateRect(&second, kDirtyMarginPx, kDirtyMarginPx);
+        RequestPaintRect(second);
+        return;
+    }
+
     const Control* control = FindControl(id);
     if (control == nullptr)
     {
@@ -2914,6 +3157,8 @@ void SettingsWindow::RepaintAfterAction(int id)
         {&m_layout.notifCard, false},
         {&m_layout.recordCard, false},
         {&m_layout.aiCard, false},
+        {&m_layout.screenCard, false},
+        {&m_layout.screenBgCard, false},
     };
     for (const CardEntry& entry : cards)
     {
@@ -3587,6 +3832,9 @@ void SettingsWindow::PerformAction(int id)
     case kIdNavMeeting:
         SetPage(2);
         return;
+    case kIdNavScreensaver:
+        SetPage(3);
+        return;
 
     case kIdRecordBrowse:
         BrowseRecordDirectory();
@@ -3606,6 +3854,67 @@ void SettingsWindow::PerformAction(int id)
         // Text fields are focused by the mouse-down handler; nothing to do on
         // mouse-up (keeps the caret where the user clicked).
         return;
+
+    // --- v5.5 screensaver & rest page ----------------------------------
+    case kIdScreenEnable:
+        m_pending.screensaverEnable = !m_pending.screensaverEnable;
+        break;
+    case kIdScreenIntervalMinus:
+        m_pending.screensaverIntervalMinutes = ClampIntValue(
+            m_pending.screensaverIntervalMinutes -
+                kScreenIntervalStepMinutes,
+            kScreensaverIntervalMinMinutes, kScreensaverIntervalMaxMinutes);
+        break;
+    case kIdScreenIntervalPlus:
+        m_pending.screensaverIntervalMinutes = ClampIntValue(
+            m_pending.screensaverIntervalMinutes +
+                kScreenIntervalStepMinutes,
+            kScreensaverIntervalMinMinutes, kScreensaverIntervalMaxMinutes);
+        break;
+    case kIdScreenDurationMinus:
+    case kIdScreenDurationPlus:
+    {
+        int minutes = ClampIntValue(
+            (m_pending.screensaverDurationSeconds + 30) / 60,
+            kScreenDurationMinMinutes, kScreenDurationMaxMinutes);
+        minutes += (id == kIdScreenDurationPlus) ? 1 : -1;
+        minutes = ClampIntValue(minutes, kScreenDurationMinMinutes,
+                                kScreenDurationMaxMinutes);
+        m_pending.screensaverDurationSeconds = minutes * 60;
+        break;
+    }
+    case kIdScreenPostponeMinus:
+        m_pending.screensaverPostponeMinutes = ClampIntValue(
+            m_pending.screensaverPostponeMinutes - 1,
+            kScreensaverPostponeMinMinutes, kScreensaverPostponeMaxMinutes);
+        break;
+    case kIdScreenPostponePlus:
+        m_pending.screensaverPostponeMinutes = ClampIntValue(
+            m_pending.screensaverPostponeMinutes + 1,
+            kScreensaverPostponeMinMinutes, kScreensaverPostponeMaxMinutes);
+        break;
+    case kIdScreenExtendMinus:
+        m_pending.screensaverExtendMinutes = ClampIntValue(
+            m_pending.screensaverExtendMinutes - 1,
+            kScreensaverExtendMinMinutes, kScreensaverExtendMaxMinutes);
+        break;
+    case kIdScreenExtendPlus:
+        m_pending.screensaverExtendMinutes = ClampIntValue(
+            m_pending.screensaverExtendMinutes + 1,
+            kScreensaverExtendMinMinutes, kScreensaverExtendMaxMinutes);
+        break;
+    case kIdScreenBlockGame:
+        m_pending.screensaverBlockInGame = !m_pending.screensaverBlockInGame;
+        break;
+    case kIdScreenBgLandscape:
+        m_pending.screensaverBackground = SCREENSAVER_BG_LANDSCAPE;
+        break;
+    case kIdScreenBgSolid:
+        m_pending.screensaverBackground = SCREENSAVER_BG_SOLID;
+        break;
+    case kIdScreenBgGradient:
+        m_pending.screensaverBackground = SCREENSAVER_BG_GRADIENT;
+        break;
 
     default:
         return;

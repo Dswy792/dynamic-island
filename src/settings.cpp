@@ -107,6 +107,23 @@ void ValidateSettings(AppSettings& settings)
         ClampInt(settings.hideDelaySeconds, kHideDelayMinSeconds, kHideDelayMaxSeconds);
     settings.notifyPeekSeconds = ClampInt(settings.notifyPeekSeconds,
                                          kNotifyPeekSecondsMin, kNotifyPeekSecondsMax);
+    settings.screensaverIntervalMinutes =
+        ClampInt(settings.screensaverIntervalMinutes,
+                 kScreensaverIntervalMinMinutes,
+                 kScreensaverIntervalMaxMinutes);
+    settings.screensaverDurationSeconds =
+        ClampInt(settings.screensaverDurationSeconds,
+                 kScreensaverDurationMinSeconds,
+                 kScreensaverDurationMaxSeconds);
+    settings.screensaverPostponeMinutes =
+        ClampInt(settings.screensaverPostponeMinutes,
+                 kScreensaverPostponeMinMinutes,
+                 kScreensaverPostponeMaxMinutes);
+    settings.screensaverExtendMinutes =
+        ClampInt(settings.screensaverExtendMinutes,
+                 kScreensaverExtendMinMinutes, kScreensaverExtendMaxMinutes);
+    settings.screensaverBackground =
+        ClampInt(settings.screensaverBackground, 0, SCREENSAVER_BG_COUNT - 1);
 
     if (settings.customX < -32000)
         settings.customX = -100000;
@@ -162,6 +179,27 @@ void LoadSettings()
         settings.aiSttModel = ReadString(key, L"AiSttModel", settings.aiSttModel);
         settings.aiSummaryModel =
             ReadString(key, L"AiSummaryModel", settings.aiSummaryModel);
+
+        settings.screensaverEnable =
+            ReadBool(key, L"ScreensaverEnable", settings.screensaverEnable);
+        settings.screensaverIntervalMinutes =
+            ReadInt(key, L"ScreensaverIntervalMinutes",
+                    settings.screensaverIntervalMinutes);
+        settings.screensaverDurationSeconds =
+            ReadInt(key, L"ScreensaverDurationSeconds",
+                    settings.screensaverDurationSeconds);
+        settings.screensaverPostponeMinutes =
+            ReadInt(key, L"ScreensaverPostponeMinutes",
+                    settings.screensaverPostponeMinutes);
+        settings.screensaverExtendMinutes =
+            ReadInt(key, L"ScreensaverExtendMinutes",
+                    settings.screensaverExtendMinutes);
+        settings.screensaverBlockInGame =
+            ReadBool(key, L"ScreensaverBlockInGame",
+                     settings.screensaverBlockInGame);
+        settings.screensaverBackground =
+            ReadInt(key, L"ScreensaverBackground",
+                    settings.screensaverBackground);
 
         if (version >= 2)
         {
@@ -228,6 +266,17 @@ bool SaveSettings()
     WriteRegString(key, L"AiApiKey", g_settings.aiApiKey);
     WriteRegString(key, L"AiSttModel", g_settings.aiSttModel);
     WriteRegString(key, L"AiSummaryModel", g_settings.aiSummaryModel);
+    WriteBool(key, L"ScreensaverEnable", g_settings.screensaverEnable);
+    WriteInt(key, L"ScreensaverIntervalMinutes",
+             g_settings.screensaverIntervalMinutes);
+    WriteInt(key, L"ScreensaverDurationSeconds",
+             g_settings.screensaverDurationSeconds);
+    WriteInt(key, L"ScreensaverPostponeMinutes",
+             g_settings.screensaverPostponeMinutes);
+    WriteInt(key, L"ScreensaverExtendMinutes",
+             g_settings.screensaverExtendMinutes);
+    WriteBool(key, L"ScreensaverBlockInGame", g_settings.screensaverBlockInGame);
+    WriteInt(key, L"ScreensaverBackground", g_settings.screensaverBackground);
 
     // Legacy values are no longer used once the new schema has been written.
     DeleteValue(key, L"HideDelayMinutes");
