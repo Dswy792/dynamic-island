@@ -254,6 +254,8 @@ enum ControlId
     kIdAiKey,
     kIdAiStt,
     kIdAiSummary,
+    // Reveal/hide the API key (not part of the four text fields).
+    kIdAiKeyReveal,
 };
 
 // ---------------------------------------------------------------------------
@@ -480,7 +482,7 @@ public:
               bool bold, COLORREF color, BYTE alpha = 255,
               StringAlignment horizontal = StringAlignmentNear,
               StringAlignment vertical = StringAlignmentCenter,
-              bool ellipsis = false)
+              bool ellipsis = false, bool typographic = false)
     {
         if (text.empty() || !Visible(layout))
             return;
@@ -490,7 +492,11 @@ public:
             return;
 
         SolidBrush brush(GdiColor(color, alpha));
-        StringFormat format;
+        // Text inputs measure with GenericTypographic; drawing must use the same
+        // format or the caret drifts away from the real glyph positions.
+        StringFormat measured(StringFormat::GenericTypographic());
+        StringFormat plain;
+        StringFormat& format = typographic ? measured : plain;
         format.SetAlignment(horizontal);
         format.SetLineAlignment(vertical);
         format.SetFormatFlags(StringFormatFlagsNoWrap);
@@ -756,6 +762,32 @@ const wchar_t* TextFieldPlaceholder(int index)
     }
 }
 
+constexpr float kRevealButtonSizeDip = 22.0f;
+constexpr float kRevealButtonAreaDip = 30.0f;
+
+RectF KeyRevealRectF(const RectF& fieldRect, float scale)
+{
+    const float size = kRevealButtonSizeDip * scale;
+    const float margin = (kRevealButtonAreaDip - kRevealButtonSizeDip) * 0.5f * scale;
+    return RectF(fieldRect.X + fieldRect.Width - margin - size,
+                 fieldRect.Y + (fieldRect.Height - size) * 0.5f, size, size);
+}
+
+RECT KeyRevealRect(const RECT& fieldRect, float scale)
+{
+    const RectF field(static_cast<float>(fieldRect.left),
+                      static_cast<float>(fieldRect.top),
+                      static_cast<float>(fieldRect.right - fieldRect.left),
+                      static_cast<float>(fieldRect.bottom - fieldRect.top));
+    const RectF eye = KeyRevealRectF(field, scale);
+    RECT result = {};
+    result.left = static_cast<LONG>(std::lround(eye.X));
+    result.top = static_cast<LONG>(std::lround(eye.Y));
+    result.right = static_cast<LONG>(std::lround(eye.X + eye.Width));
+    result.bottom = static_cast<LONG>(std::lround(eye.Y + eye.Height));
+    return result;
+}
+
 std::wstring MaskedText(const std::wstring& text)
 {
     std::wstring masked;
@@ -872,10 +904,13 @@ void DrawNavIcon(Painter& painter, const RectF& rect, int page, COLORREF color)
 }
 
 // Fully custom single-line text editor (the window has no native controls):
-// caret, horizontal scrolling, masking and placeholder support.
+// caret, horizontal scrolling, masking, placeholder and an optional reveal
+// (eye) button. Measurement and drawing both use GenericTypographic so the
+// caret stays exactly on the character boundary.
 void DrawTextInput(Painter& painter, const RectF& rect, const std::wstring& text,
                    const wchar_t* placeholder, bool focused, bool masked,
-                   bool caretVisible, int caretPos)
+                   bool caretVisible, int caretPos, bool hasRevealButton,
+                   bool revealed)
 {
     if (!painter.Visible(rect))
         return;
@@ -888,48 +923,93 @@ void DrawTextInput(Painter& painter, const RectF& rect, const std::wstring& text
                             focused ? 1.5f : 1.0f);
 
     const RectF inner = InsetRectF(rect, 10.0f * scale);
+    RectF textInner = inner;
+    if (hasRevealButton)
+    {
+        textInner.Width =
+            std::max(1.0f, inner.Width - kRevealButtonAreaDip * scale);
+    }
+
     const bool empty = text.empty();
     const std::wstring display =
         empty ? std::wstring() : (masked ? MaskedText(text) : text);
 
     if (!focused)
     {
-        painter.Text(empty ? std::wstring(placeholder) : display, inner,
+        painter.Text(empty ? std::wstring(placeholder) : display, textInner,
                      kTextFieldTextSizeDip, false,
                      empty ? palette.panelTextSecondary : palette.panelText, 255,
-                     StringAlignmentNear, StringAlignmentCenter, true);
-        return;
-    }
-
-    const int caret = ClampIntValue(caretPos, 0, static_cast<int>(display.size()));
-    const int scrollStart =
-        ComputeFieldScrollStart(painter, display, caret, inner.Width);
-    const GraphicsState state = painter.G().Save();
-    painter.G().SetClip(inner, CombineModeReplace);
-    if (empty)
-    {
-        painter.Text(std::wstring(placeholder), inner, kTextFieldTextSizeDip,
-                     false, palette.panelTextSecondary, 255,
-                     StringAlignmentNear, StringAlignmentCenter, true);
+                     StringAlignmentNear, StringAlignmentCenter, true, true);
     }
     else
     {
-        const std::wstring visible =
-            display.substr(static_cast<size_t>(scrollStart));
-        painter.Text(visible, inner, kTextFieldTextSizeDip, false,
-                     palette.panelText, 255, StringAlignmentNear,
-                     StringAlignmentCenter, false);
+        const int caret =
+            ClampIntValue(caretPos, 0, static_cast<int>(display.size()));
+        const int scrollStart =
+            ComputeFieldScrollStart(painter, display, caret, textInner.Width);
+        const float scrollOffset = PrefixWidth(painter, display, scrollStart);
+        const GraphicsState state = painter.G().Save();
+        painter.G().SetClip(textInner, CombineModeReplace);
+        if (empty)
+        {
+            painter.Text(std::wstring(placeholder), textInner,
+                         kTextFieldTextSizeDip, false, palette.panelTextSecondary,
+                         255, StringAlignmentNear, StringAlignmentCenter, true,
+                         true);
+        }
+        else
+        {
+            // Draw the full string with a translation instead of a substring:
+            // kerning around the cut boundary would otherwise shift glyphs and
+            // make the caret drift away from the text.
+            const RectF textLayout(
+                textInner.X - scrollOffset, textInner.Y,
+                textInner.Width + scrollOffset + 8.0f * scale, textInner.Height);
+            painter.Text(display, textLayout, kTextFieldTextSizeDip, false,
+                         palette.panelText, 255, StringAlignmentNear,
+                         StringAlignmentCenter, false, true);
+        }
+        if (caretVisible)
+        {
+            const float caretX = std::min(
+                textInner.X + PrefixWidth(painter, display, caret) - scrollOffset,
+                textInner.X + textInner.Width - 1.0f * scale);
+            const float caretTop = inner.Y + inner.Height * 0.22f;
+            const float caretBottom = inner.Y + inner.Height * 0.78f;
+            painter.Line(PointF(caretX, caretTop), PointF(caretX, caretBottom),
+                         palette.accent, 1.5f);
+        }
+        painter.G().Restore(state);
     }
-    if (caretVisible)
+
+    if (hasRevealButton)
     {
-        const float caretX = inner.X + PrefixWidth(painter, display, caret) -
-                             PrefixWidth(painter, display, scrollStart);
-        const float caretTop = inner.Y + inner.Height * 0.22f;
-        const float caretBottom = inner.Y + inner.Height * 0.78f;
-        painter.Line(PointF(caretX, caretTop), PointF(caretX, caretBottom),
-                     palette.accent, 1.5f);
+        const RectF eye = KeyRevealRectF(rect, scale);
+        if (painter.Hovered(kIdAiKeyReveal))
+        {
+            painter.FillRoundRect(InsetRectF(eye, -3.0f * scale),
+                                  6.0f * scale, palette.panelSurfaceHover, 150);
+        }
+        const COLORREF color =
+            revealed ? palette.accent : palette.panelTextSecondary;
+        const RectF eyeShape(eye.X + 2.0f * scale,
+                             eye.Y + eye.Height * 0.32f,
+                             eye.Width - 4.0f * scale,
+                             eye.Height * 0.36f);
+        painter.StrokeEllipse(eyeShape, color, 255, 1.3f);
+        painter.FillEllipse(RectF(eye.X + eye.Width * 0.5f - 2.0f * scale,
+                                  eye.Y + eye.Height * 0.5f - 2.0f * scale,
+                                  4.0f * scale, 4.0f * scale),
+                            color);
+        if (!revealed)
+        {
+            painter.Line(PointF(eye.X + 3.0f * scale,
+                                eye.Y + eye.Height - 3.0f * scale),
+                         PointF(eye.X + eye.Width - 3.0f * scale,
+                                eye.Y + 3.0f * scale),
+                         color, 1.4f);
+        }
     }
-    painter.G().Restore(state);
 }
 
 // ---------------------------------------------------------------------------
@@ -1698,6 +1778,7 @@ private:
     int m_focusField = -1;
     int m_caretPos[kTextFieldCount] = {0, 0, 0, 0};
     bool m_caretVisible = true;
+    bool m_showApiKey = true; // keys are visible by default; the eye hides them
 
     // Dirty-rectangle repaint state (device pixels, client coordinates).
     RECT m_dirtyRect = {};
@@ -2684,9 +2765,11 @@ void SettingsWindow::DrawMeetingPage(Painter& painter)
         painter.Text(kFieldLabels[index],
                      RectF(row.X, row.Y, kAiLabelWidthDip * scale, row.Height),
                      12.0f, false, palette.panelText);
+        const bool masked = index == 1 && !m_showApiKey;
         DrawTextInput(painter, layout.aiFieldRects[index], FieldText(index),
                       TextFieldPlaceholder(index), m_focusField == index,
-                      index == 1, m_caretVisible, m_caretPos[index]);
+                      masked, m_caretVisible, m_caretPos[index],
+                      index == 1, m_showApiKey);
     }
 
     // --- Hint lines under the cards ---------------------------------------
@@ -3066,6 +3149,16 @@ void SettingsWindow::OnTimerTick()
 
 int SettingsWindow::HitTestControl(POINT clientPoint) const
 {
+    if (m_page == 2)
+    {
+        const Control* keyField = FindControl(kIdAiKey);
+        if (keyField != nullptr && PtInRect(&keyField->rect, clientPoint) != FALSE)
+        {
+            const RECT eye = KeyRevealRect(keyField->rect, m_scale);
+            if (PtInRect(&eye, clientPoint) != FALSE)
+                return kIdAiKeyReveal;
+        }
+    }
     for (const Control& control : m_layout.controls)
     {
         if (PtInRect(&control.rect, clientPoint) != FALSE)
@@ -3093,17 +3186,23 @@ bool SettingsWindow::IsPointOnTitleBar(POINT clientPoint) const
 void SettingsWindow::UpdateHover(POINT point)
 {
     const int hit = HitTestControl(point);
+    const bool revealButton = hit == kIdAiKeyReveal;
     const int hoverId =
-        (hit != kIdNone && IsControlEnabled(hit)) ? hit : kIdNone;
+        (hit != kIdNone && (revealButton || IsControlEnabled(hit))) ? hit : kIdNone;
     if (hoverId == m_hoverId)
         return;
 
+    const auto repaintHovered = [this](int id) {
+        if (id == kIdAiKeyReveal)
+            RepaintTextField(1);
+        else if (id != kIdNone)
+            RepaintControl(id);
+    };
+
     // Only the previously and newly hovered controls need repainting.
-    if (m_hoverId != kIdNone)
-        RepaintControl(m_hoverId);
+    repaintHovered(m_hoverId);
     m_hoverId = hoverId;
-    if (hoverId != kIdNone)
-        RepaintControl(hoverId);
+    repaintHovered(hoverId);
 }
 
 void SettingsWindow::UpdateCursor()
@@ -3126,6 +3225,11 @@ void SettingsWindow::UpdateCursorForPoint(POINT point)
     }
 
     const int hit = HitTestControl(point);
+    if (hit == kIdAiKeyReveal)
+    {
+        SetCursor(LoadCursorW(nullptr, IDC_HAND));
+        return;
+    }
     if (IsTextFieldId(hit))
     {
         SetCursor(LoadCursorW(nullptr, IDC_IBEAM));
@@ -3175,7 +3279,10 @@ void SettingsWindow::OnMouseLeave()
         return;
     if (m_hoverId != kIdNone)
     {
-        RepaintControl(m_hoverId);
+        if (m_hoverId == kIdAiKeyReveal)
+            RepaintTextField(1);
+        else
+            RepaintControl(m_hoverId);
         m_hoverId = kIdNone;
     }
 }
@@ -3185,6 +3292,15 @@ void SettingsWindow::OnLButtonDown(POINT point)
     SetFocus(m_hwnd);
 
     const int hit = HitTestControl(point);
+
+    // API-key eye button: toggle plaintext/masked immediately, keeping the
+    // current focus and caret position.
+    if (hit == kIdAiKeyReveal)
+    {
+        m_showApiKey = !m_showApiKey;
+        RepaintTextField(1);
+        return;
+    }
 
     // Custom text editors: focus the clicked field and place the caret. They
     // do not use the pressed/capture path (they stay focused after mouse-up).
@@ -3607,12 +3723,13 @@ void SettingsWindow::FocusTextFieldAtPoint(int index, POINT point)
     // Caret placement: nearest character boundary to the click, taking the
     // field's horizontal scroll into account (same rule as DrawTextInput).
     const std::wstring& text = FieldText(index);
-    const std::wstring display = index == 1 ? MaskedText(text) : text;
+    const std::wstring display =
+        (index == 1 && !m_showApiKey) ? MaskedText(text) : text;
     const float scale = m_scale;
     const int innerLeft = control->rect.left + RoundToInt(10.0f * scale);
     const float available =
         static_cast<float>(control->rect.right - control->rect.left) -
-        20.0f * scale;
+        20.0f * scale - (index == 1 ? kRevealButtonAreaDip * scale : 0.0f);
     const auto prefixWidth = [&](int count) {
         return MeasureTextWidthStatic(
             display.substr(0, static_cast<size_t>(std::max(0, count))),
