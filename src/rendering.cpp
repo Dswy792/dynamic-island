@@ -623,6 +623,38 @@ void DrawVideoGlyph(Graphics& graphics, const RectF& iconRect, COLORREF color,
     graphics.FillPath(&brush, &lensPath);
 }
 
+// Crescent-moon glyph used by the "屏保 / 休息" feature icon.
+void DrawMoonGlyph(Graphics& graphics, const RectF& iconRect, COLORREF color,
+                   BYTE alpha)
+{
+    if (iconRect.Width < 4.0f || iconRect.Height < 4.0f || alpha == 0)
+        return;
+
+    const REAL w = iconRect.Width;
+    const REAL h = iconRect.Height;
+    const REAL radius = w * 0.40f;
+    const RectF disc(iconRect.X + (w - radius * 2.0f) / 2.0f,
+                     iconRect.Y + (h - radius * 2.0f) / 2.0f, radius * 2.0f,
+                     radius * 2.0f);
+
+    GraphicsPath crescent;
+    crescent.AddEllipse(disc);
+    const REAL cutRadius = radius * 0.92f;
+    const REAL cutX = disc.X + radius * 1.08f;
+    const REAL cutY = disc.Y - radius * 0.28f;
+    crescent.AddEllipse(RectF(cutX, cutY, cutRadius * 2.0f, cutRadius * 2.0f));
+    crescent.SetFillMode(FillModeAlternate);
+
+    SolidBrush brush(GdiColor(color, alpha));
+    graphics.FillPath(&brush, &crescent);
+
+    // Tiny "star" dot to the upper right of the crescent.
+    const REAL dotRadius = w * 0.055f;
+    graphics.FillEllipse(&brush,
+                         RectF(iconRect.X + w * 0.74f, iconRect.Y + h * 0.18f,
+                               dotRadius * 2.0f, dotRadius * 2.0f));
+}
+
 void DrawFeatureRow(Graphics& graphics, const IslandClusterGeometry& geometry,
                     const ThemePalette& palette, REAL dpiScale, float progress,
                     int hoveredSlot)
@@ -667,7 +699,11 @@ void DrawFeatureRow(Graphics& graphics, const IslandClusterGeometry& geometry,
         const RectF iconRect(slotRect.X + (slotRect.Width - iconSize) / 2.0f,
                              slotRect.Y + (slotRect.Height - iconSize) / 2.0f,
                              iconSize, iconSize);
-        DrawVideoGlyph(graphics, iconRect, palette.islandText, alpha);
+        // Slot 0 = 会议 / 视频纪要 (camera), slot 1 = 屏保 (crescent moon).
+        if (i == 1)
+            DrawMoonGlyph(graphics, iconRect, palette.islandText, alpha);
+        else
+            DrawVideoGlyph(graphics, iconRect, palette.islandText, alpha);
     }
 }
 

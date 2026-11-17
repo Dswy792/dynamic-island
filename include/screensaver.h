@@ -17,3 +17,9 @@ void ScreensaverOnTick();
 void ScreensaverApplySettings();
 bool IsScreensaverActive();
 bool IsScreensaverNoticeVisible();
+
+// Enter the full-screen screensaver immediately (manual trigger from the island
+// feature row: no notice / countdown, uses the configured duration). Does
+// nothing when the overlay is already active or when a fullscreen game blocks it
+// (screensaverBlockInGame).
+void StartScreensaverNow();

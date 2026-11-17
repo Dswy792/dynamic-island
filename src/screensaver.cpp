@@ -35,6 +35,7 @@
 #include "color_util.h"
 #include "layout.h"
 #include "rendering.h"
+#include "settings.h"
 #include "theme.h"
 
 #pragma comment(lib, "gdiplus.lib")
@@ -70,11 +71,32 @@ constexpr float kNoticeContentMarginDip = 20.0f;
 // Fullscreen overlay chrome.
 constexpr float kBarWidthDip = 420.0f;
 constexpr float kBarHeightDip = 6.0f;
-constexpr float kExtendWidthDip = 156.0f;
-constexpr float kExtendHeightDip = 30.0f;
-constexpr float kSkipWidthDip = 54.0f;
-constexpr float kSkipHeightDip = 24.0f;
-constexpr float kSkipGapDip = 8.0f;
+constexpr float kControlWidthDip = 64.0f; // 跳过 and 延长 are exactly equal
+constexpr float kControlHeightDip = 28.0f;
+constexpr float kControlGapDip = 8.0f;
+constexpr float kBarToControlsGapDip = 20.0f;
+constexpr float kControlFontDip = 13.0f;
+
+// "延长" minutes chooser (popup above the two buttons); each background style
+// gets its own shape.
+constexpr int kChooserMinutes[] = {1, 5, 10, 15, 30};
+constexpr int kChooserOptionCount =
+    static_cast<int>(sizeof(kChooserMinutes) / sizeof(kChooserMinutes[0]));
+constexpr float kChooserPaddingDip = 6.0f;
+// landscape: understated wide strip with thin dividers
+constexpr float kLandscapeChooserOptionWidthDip = 70.0f;
+constexpr float kLandscapeChooserHeightDip = 42.0f;
+// solid: minimal vertical card with an outline
+constexpr float kSolidChooserWidthDip = 124.0f;
+constexpr float kSolidChooserOptionHeightDip = 28.0f;
+// gradient: glassy chips row
+constexpr float kChipChooserWidthDip = 60.0f;
+constexpr float kChipChooserHeightDip = 30.0f;
+constexpr float kChipChooserGapDip = 8.0f;
+
+// Hide the countdown / buttons / chooser / mouse cursor after this much mouse
+// inactivity.
+constexpr ULONGLONG kControlsIdleHideMs = 1000;
 
 // Date / time block margins per background.
 constexpr float kLandscapeTimeMarginDip = 56.0f;
@@ -293,6 +315,23 @@ std::wstring ToWString(int value)
     return std::to_wstring(value);
 }
 
+// Nearest chooser option for the persisted screensaverExtendMinutes value.
+int ChooserIndexForMinutes(int minutes)
+{
+    int bestIndex = 0;
+    int bestDelta = 0x7FFFFFFF;
+    for (int i = 0; i < kChooserOptionCount; ++i)
+    {
+        const int delta = std::abs(minutes - kChooserMinutes[i]);
+        if (delta < bestDelta)
+        {
+            bestDelta = delta;
+            bestIndex = i;
+        }
+    }
+    return bestIndex;
+}
+
 // Cheap "has the displayed minute changed" key (year/month/day/hour/minute).
 ULONGLONG CurrentMinuteKey()
 {
@@ -445,13 +484,6 @@ int PostponeMinutes()
     return ClampInt(g_settings.screensaverPostponeMinutes,
                     kScreensaverPostponeMinMinutes,
                     kScreensaverPostponeMaxMinutes);
-}
-
-int ExtendMinutes()
-{
-    return ClampInt(g_settings.screensaverExtendMinutes,
-                    kScreensaverExtendMinMinutes,
-                    kScreensaverExtendMaxMinutes);
 }
 
 int BackgroundMode()
@@ -1161,14 +1193,16 @@ private:
     void DrawVignette(Graphics& graphics);
     void DrawQuote(Graphics& graphics);
     void DrawTimeBlock(Graphics& graphics);
+    void DrawControlButton(Graphics& graphics, const RECT& rect,
+                           const wchar_t* label, bool hovered, bool pressed);
     void DrawSkipButton(Graphics& graphics);
     void DrawExtendButton(Graphics& graphics);
+    void DrawChooser(Graphics& graphics);
     void DrawProgress(Graphics& graphics);
     void RestoreRegion(Graphics& graphics, const RECT& region);
     void PresentFull(BYTE constantAlpha);
     void PresentRegion(const RECT& dirty);
-    void UpdateSkipRegion();
-    void UpdateExtendRegion();
+    void UpdateControlsRegion(bool includeChooserArea = false);
     void UpdateProgressRegion();
     void UpdateTimeRegion();
     void UpdateHover(POINT point);
@@ -1177,17 +1211,21 @@ private:
     void OnLButtonUp(POINT point);
     void OnClockTick();
     void OnFadeTick();
-    void ExtendDuration();
+    void ExtendDurationBy(int minutes);
     Font* GetFont(int pixelSize, bool bold, bool italic, bool cjk);
     RectF PrimaryRectF() const;
     RECT PrimaryRect() const;
+    RECT ControlsGroupRect() const;
     RECT SkipRect() const;
     RECT ExtendRect() const;
     RECT BarRect() const;
     RECT RemainingTextRect() const;
     RECT ProgressRect() const;
     RECT TimeRect() const;
-    int HitTest(POINT point) const; // 0 none, 1 skip, 2 extend
+    RECT ChooserRect() const;
+    RECT ChooserOptionRect(int index) const;
+    RECT ControlsRegionRect(bool includeChooser) const;
+    int HitTest(POINT point) const; // 0 none, 1 skip, 2 extend, 3+ chooser option
 
     HWND m_hwnd = nullptr;
     HWND m_owner = nullptr;
@@ -1216,6 +1254,11 @@ private:
     int m_hovered = 0;
     int m_pressed = 0;
     bool m_trackingMouse = false;
+    bool m_controlsVisible = true;
+    bool m_chooserOpen = false;
+    int m_chooserHovered = -1;
+    int m_chooserPressed = 0;
+    ULONGLONG m_lastMouseMoveTick = 0;
 
     Bitmap* m_background = nullptr;
     Bitmap* m_frame = nullptr;
@@ -1279,45 +1322,6 @@ RECT RestOverlay::PrimaryRect() const
     return rect;
 }
 
-RECT RestOverlay::SkipRect() const
-{
-    // Subtle "跳过" right next to the remaining-time text.
-    const RECT text = RemainingTextRect();
-    const int width = RoundToInt(kSkipWidthDip * m_scale);
-    const int height = RoundToInt(kSkipHeightDip * m_scale);
-    const int centerY = (text.top + text.bottom) / 2;
-    RECT rect = {};
-    rect.left = text.right + RoundToInt(kSkipGapDip * m_scale);
-    rect.right = rect.left + width;
-    rect.top = centerY - height / 2;
-    rect.bottom = rect.top + height;
-    return rect;
-}
-
-RECT RestOverlay::ExtendRect() const
-{
-    // Always visible, sitting right next to the progress bar.
-    const RECT primary = PrimaryRect();
-    const RECT bar = BarRect();
-    const int width = RoundToInt(kExtendWidthDip * m_scale);
-    const int height = RoundToInt(kExtendHeightDip * m_scale);
-    const int gap = RoundToInt(22.0f * m_scale);
-    RECT rect = {};
-    rect.left = bar.right + gap;
-    rect.right = rect.left + width;
-    const int centerY = (bar.top + bar.bottom) / 2;
-    rect.top = centerY - height / 2;
-    rect.bottom = rect.top + height;
-    const int limit = primary.right - RoundToInt(24.0f * m_scale);
-    if (rect.right > limit)
-    {
-        const int shift = rect.right - limit;
-        rect.left -= shift;
-        rect.right -= shift;
-    }
-    return rect;
-}
-
 RECT RestOverlay::BarRect() const
 {
     const RECT primary = PrimaryRect();
@@ -1333,30 +1337,186 @@ RECT RestOverlay::BarRect() const
     return rect;
 }
 
+RECT RestOverlay::ControlsGroupRect() const
+{
+    // [跳过] [延长] side by side, immediately to the right of the progress bar.
+    const RECT bar = BarRect();
+    const int gap = RoundToInt(kBarToControlsGapDip * m_scale);
+    const int width = RoundToInt((kControlWidthDip * 2.0f + kControlGapDip) *
+                                 m_scale);
+    const int height = RoundToInt(kControlHeightDip * m_scale);
+    RECT rect = {};
+    rect.left = bar.right + gap;
+    rect.right = rect.left + width;
+    const int centerY = (bar.top + bar.bottom) / 2;
+    rect.top = centerY - height / 2;
+    rect.bottom = rect.top + height;
+    return rect;
+}
+
+RECT RestOverlay::SkipRect() const
+{
+    const RECT group = ControlsGroupRect();
+    RECT rect = group;
+    rect.right = rect.left + RoundToInt(kControlWidthDip * m_scale);
+    return rect;
+}
+
+RECT RestOverlay::ExtendRect() const
+{
+    const RECT group = ControlsGroupRect();
+    RECT rect = group;
+    rect.left =
+        group.left + RoundToInt((kControlWidthDip + kControlGapDip) * m_scale);
+    return rect;
+}
+
 RECT RestOverlay::RemainingTextRect() const
 {
-    // Right-aligned text box that ends just left of the "跳过" button.
+    // "剩余 mm:ss", horizontally centred on the primary monitor above the bar.
     const RECT primary = PrimaryRect();
-    const int width = RoundToInt(320.0f * m_scale);
-    const int height = RoundToInt(24.0f * m_scale);
+    const RECT bar = BarRect();
+    const int width = RoundToInt(300.0f * m_scale);
+    const int height = RoundToInt(22.0f * m_scale);
     const int centerX = (primary.left + primary.right) / 2;
     RECT rect = {};
-    rect.right = centerX - RoundToInt(4.0f * m_scale);
-    rect.left = rect.right - width;
-    rect.bottom = primary.bottom - RoundToInt(112.0f * m_scale);
+    rect.left = centerX - width / 2;
+    rect.right = centerX + width / 2;
+    rect.bottom = bar.top - RoundToInt(10.0f * m_scale);
     rect.top = rect.bottom - height;
     return rect;
 }
 
 RECT RestOverlay::ProgressRect() const
 {
-    RECT rect = RemainingTextRect();
-    const RECT bar = BarRect();
-    rect.left = std::min(rect.left, bar.left);
-    rect.top = std::min(rect.top, bar.top);
-    rect.right = std::max(rect.right, bar.right);
-    rect.bottom = std::max(rect.bottom, bar.bottom);
+    RECT rect = BarRect();
+    if (m_controlsVisible)
+    {
+        const RECT text = RemainingTextRect();
+        rect.left = std::min(rect.left, text.left);
+        rect.top = std::min(rect.top, text.top);
+        rect.right = std::max(rect.right, text.right);
+        rect.bottom = std::max(rect.bottom, text.bottom);
+    }
     const int pad = RoundToInt(14.0f * m_scale);
+    InflateRect(&rect, pad, pad);
+    return rect;
+}
+
+RECT RestOverlay::ChooserRect() const
+{
+    const RECT group = ControlsGroupRect();
+    int width = 0;
+    int height = 0;
+    switch (m_backgroundMode)
+    {
+    case SCREENSAVER_BG_SOLID:
+        width = RoundToInt((kSolidChooserWidthDip + kChooserPaddingDip * 2.0f) *
+                           m_scale);
+        height = RoundToInt((kSolidChooserOptionHeightDip *
+                                 static_cast<float>(kChooserOptionCount) +
+                             kChooserPaddingDip * 2.0f) *
+                            m_scale);
+        break;
+    case SCREENSAVER_BG_GRADIENT:
+        width = RoundToInt((kChipChooserWidthDip * kChooserOptionCount +
+                            kChipChooserGapDip * (kChooserOptionCount - 1)) *
+                           m_scale);
+        height = RoundToInt(kChipChooserHeightDip * m_scale);
+        break;
+    case SCREENSAVER_BG_LANDSCAPE:
+    default:
+        width = RoundToInt((kLandscapeChooserOptionWidthDip * kChooserOptionCount +
+                            kChooserPaddingDip * 2.0f) *
+                           m_scale);
+        height = RoundToInt(kLandscapeChooserHeightDip * m_scale);
+        break;
+    }
+
+    const int centerX = (group.left + group.right) / 2;
+    RECT rect = {};
+    rect.left = centerX - width / 2;
+    rect.right = rect.left + width;
+    rect.bottom = group.top - RoundToInt(10.0f * m_scale);
+    rect.top = rect.bottom - height;
+
+    // Keep the popup inside the primary monitor.
+    const RECT primary = PrimaryRect();
+    const int limitLeft = primary.left + RoundToInt(16.0f * m_scale);
+    const int limitRight = primary.right - RoundToInt(16.0f * m_scale);
+    if (rect.right > limitRight)
+    {
+        const int shift = rect.right - limitRight;
+        rect.left -= shift;
+        rect.right -= shift;
+    }
+    if (rect.left < limitLeft)
+    {
+        const int shift = limitLeft - rect.left;
+        rect.left += shift;
+        rect.right += shift;
+    }
+    return rect;
+}
+
+RECT RestOverlay::ChooserOptionRect(int index) const
+{
+    const RECT panel = ChooserRect();
+    const int padding = RoundToInt(kChooserPaddingDip * m_scale);
+    RECT rect = {};
+    switch (m_backgroundMode)
+    {
+    case SCREENSAVER_BG_SOLID:
+    {
+        const int rowHeight = RoundToInt(kSolidChooserOptionHeightDip * m_scale);
+        rect.left = panel.left + padding;
+        rect.right = panel.right - padding;
+        rect.top = panel.top + padding + index * rowHeight;
+        rect.bottom = rect.top + rowHeight;
+        break;
+    }
+    case SCREENSAVER_BG_GRADIENT:
+    {
+        const int chipWidth = RoundToInt(kChipChooserWidthDip * m_scale);
+        const int gap = RoundToInt(kChipChooserGapDip * m_scale);
+        rect.left = panel.left + index * (chipWidth + gap);
+        rect.right = rect.left + chipWidth;
+        rect.top = panel.top;
+        rect.bottom = panel.bottom;
+        break;
+    }
+    case SCREENSAVER_BG_LANDSCAPE:
+    default:
+    {
+        const int optionWidth =
+            RoundToInt(kLandscapeChooserOptionWidthDip * m_scale);
+        rect.left = panel.left + padding + index * optionWidth;
+        rect.right = rect.left + optionWidth;
+        rect.top = panel.top + padding;
+        rect.bottom = panel.bottom - padding;
+        break;
+    }
+    }
+    return rect;
+}
+
+RECT RestOverlay::ControlsRegionRect(bool includeChooser) const
+{
+    RECT rect = ControlsGroupRect();
+    const RECT text = RemainingTextRect();
+    rect.left = std::min(rect.left, text.left);
+    rect.top = std::min(rect.top, text.top);
+    rect.right = std::max(rect.right, text.right);
+    rect.bottom = std::max(rect.bottom, text.bottom);
+    if (m_chooserOpen || includeChooser)
+    {
+        const RECT chooser = ChooserRect();
+        rect.left = std::min(rect.left, chooser.left);
+        rect.top = std::min(rect.top, chooser.top);
+        rect.right = std::max(rect.right, chooser.right);
+        rect.bottom = std::max(rect.bottom, chooser.bottom);
+    }
+    const int pad = RoundToInt(12.0f * m_scale);
     InflateRect(&rect, pad, pad);
     return rect;
 }
@@ -1869,31 +2029,35 @@ void RestOverlay::DrawQuote(Graphics& graphics)
     }
 }
 
-void RestOverlay::DrawSkipButton(Graphics& graphics)
+void RestOverlay::DrawControlButton(Graphics& graphics, const RECT& rect,
+                                    const wchar_t* label, bool hovered,
+                                    bool pressed)
 {
-    const RECT rect = SkipRect();
     const RectF pill(static_cast<REAL>(rect.left), static_cast<REAL>(rect.top),
                      static_cast<REAL>(rect.right - rect.left),
                      static_cast<REAL>(rect.bottom - rect.top));
-    const bool hovered = m_hovered == 1;
-    const bool pressed = m_pressed == 1;
-
-    SolidBrush fill(Color(hovered ? 130 : (pressed ? 165 : 70), 0, 0, 0));
+    SolidBrush fill(Color(hovered ? 178 : (pressed ? 205 : 132), 0, 0, 0));
     GraphicsPath path;
     AddRoundedRectPath(path, pill, pill.Height * 0.5f);
     graphics.FillPath(&fill, &path);
-    Pen border(Color(hovered ? 150 : 85, 255, 255, 255),
+    Pen border(Color(hovered ? 150 : 110, 255, 255, 255),
                std::max(1.0f, m_scale));
     graphics.DrawPath(&border, &path);
 
-    Font* font =
-        GetFont(std::max(6, RoundToInt(11.5f * m_scale)), false, false, true);
+    Font* font = GetFont(std::max(6, RoundToInt(kControlFontDip * m_scale)),
+                         false, false, true);
     StringFormat format;
     format.SetAlignment(StringAlignmentCenter);
     format.SetLineAlignment(StringAlignmentCenter);
     format.SetFormatFlags(StringFormatFlagsNoWrap);
-    SolidBrush text(Color(hovered ? 245 : 205, 250, 250, 252));
-    graphics.DrawString(L"跳过", -1, font, pill, &format, &text);
+    SolidBrush text(Color(hovered ? 250 : 225, 250, 250, 252));
+    graphics.DrawString(label, -1, font, pill, &format, &text);
+}
+
+void RestOverlay::DrawSkipButton(Graphics& graphics)
+{
+    DrawControlButton(graphics, SkipRect(), L"跳过", m_hovered == 1,
+                      m_pressed == 1);
 }
 
 void RestOverlay::DrawTimeBlock(Graphics& graphics)
@@ -2000,32 +2164,189 @@ void RestOverlay::DrawTimeBlock(Graphics& graphics)
 
 void RestOverlay::DrawExtendButton(Graphics& graphics)
 {
-    const RECT rect = ExtendRect();
-    const RectF pill(static_cast<REAL>(rect.left), static_cast<REAL>(rect.top),
-                     static_cast<REAL>(rect.right - rect.left),
-                     static_cast<REAL>(rect.bottom - rect.top));
-    const bool hovered = m_hovered == 2;
-    const bool pressed = m_pressed == 2;
+    DrawControlButton(graphics, ExtendRect(), L"延长", m_hovered == 2,
+                      m_pressed == 2);
+}
 
-    SolidBrush brush(Color(hovered ? 205 : (pressed ? 175 : 150), 0, 0, 0));
-    GraphicsPath path;
-    AddRoundedRectPath(path, pill, pill.Height * 0.5f);
-    graphics.FillPath(&brush, &path);
-    Pen border(Color(hovered ? 150 : 110, 255, 255, 255),
-               std::max(1.0f, m_scale));
-    graphics.DrawPath(&border, &path);
+void RestOverlay::DrawChooser(Graphics& graphics)
+{
+    const RECT panelRect = ChooserRect();
+    const RectF panel(static_cast<REAL>(panelRect.left),
+                      static_cast<REAL>(panelRect.top),
+                      static_cast<REAL>(panelRect.right - panelRect.left),
+                      static_cast<REAL>(panelRect.bottom - panelRect.top));
+    const int defaultIndex = ChooserIndexForMinutes(
+        ClampInt(g_settings.screensaverExtendMinutes, 1, 60));
 
-    const std::wstring label =
-        std::wstring(L"延长 ") + ToWString(ExtendMinutes()) + L" 分钟";
-    Font* font = GetFont(std::max(6, RoundToInt(13.5f * m_scale)), true, false,
-                         true);
+    Font* font =
+        GetFont(std::max(6, RoundToInt(12.5f * m_scale)), false, false, true);
     StringFormat format;
     format.SetAlignment(StringAlignmentCenter);
     format.SetLineAlignment(StringAlignmentCenter);
     format.SetFormatFlags(StringFormatFlagsNoWrap);
-    SolidBrush text(Color(hovered ? 252 : 238, 250, 250, 252));
-    graphics.DrawString(label.c_str(), static_cast<INT>(label.length()), font, pill,
-                        &format, &text);
+
+    switch (m_backgroundMode)
+    {
+    case SCREENSAVER_BG_SOLID:
+    {
+        // Minimal floating card: dark surface, hairline outline, selected
+        // option marked with a subtle underline.
+        SolidBrush fill(Color(242, 10, 11, 16));
+        GraphicsPath path;
+        AddRoundedRectPath(path, panel, 10.0f * m_scale);
+        graphics.FillPath(&fill, &path);
+        Pen border(Color(120, 255, 255, 255), std::max(1.0f, m_scale));
+        graphics.DrawPath(&border, &path);
+
+        for (int i = 0; i < kChooserOptionCount; ++i)
+        {
+            const RECT optionRect = ChooserOptionRect(i);
+            const RectF option(
+                static_cast<REAL>(optionRect.left),
+                static_cast<REAL>(optionRect.top),
+                static_cast<REAL>(optionRect.right - optionRect.left),
+                static_cast<REAL>(optionRect.bottom - optionRect.top));
+            const bool hovered = m_chooserHovered == i;
+            const bool selected = i == defaultIndex;
+            if (hovered)
+            {
+                SolidBrush highlight(Color(30, 255, 255, 255));
+                GraphicsPath highlightPath;
+                AddRoundedRectPath(highlightPath, option, 6.0f * m_scale);
+                graphics.FillPath(&highlight, &highlightPath);
+            }
+            const std::wstring label =
+                ToWString(kChooserMinutes[i]) + L" 分钟";
+            SolidBrush text(hovered ? Color(244, 250, 250, 252)
+                                    : (selected ? Color(235, 246, 246, 248)
+                                                : Color(190, 224, 226, 230)));
+            graphics.DrawString(label.c_str(), static_cast<INT>(label.length()),
+                                font, option, &format, &text);
+            if (selected)
+            {
+                const REAL underlineWidth = 24.0f * m_scale;
+                const REAL underlineHeight = std::max(1.5f, 2.0f * m_scale);
+                const RectF underline(
+                    option.X + (option.Width - underlineWidth) / 2.0f,
+                    option.Y + option.Height - 7.0f * m_scale, underlineWidth,
+                    underlineHeight);
+                SolidBrush line(Color(200, 232, 232, 238));
+                graphics.FillRectangle(&line, underline);
+            }
+        }
+        break;
+    }
+    case SCREENSAVER_BG_GRADIENT:
+    {
+        // Glassy chips row with a warm accent-tinted selection that matches the
+        // dusk gradient palette.
+        for (int i = 0; i < kChooserOptionCount; ++i)
+        {
+            const RECT optionRect = ChooserOptionRect(i);
+            const RectF chip(
+                static_cast<REAL>(optionRect.left),
+                static_cast<REAL>(optionRect.top),
+                static_cast<REAL>(optionRect.right - optionRect.left),
+                static_cast<REAL>(optionRect.bottom - optionRect.top));
+            const bool hovered = m_chooserHovered == i;
+            const bool selected = i == defaultIndex;
+
+            COLORREF fill = RGB(255, 255, 255);
+            BYTE fillAlpha = 36;
+            COLORREF borderColor = RGB(255, 255, 255);
+            BYTE borderAlpha = 95;
+            if (selected)
+            {
+                fill = RGB(236, 160, 118);
+                fillAlpha = 175;
+                borderColor = RGB(255, 206, 168);
+                borderAlpha = 225;
+            }
+            else if (hovered)
+            {
+                fillAlpha = 78;
+                borderAlpha = 155;
+            }
+
+            SolidBrush chipBrush(GdiColor(fill, fillAlpha));
+            GraphicsPath chipPath;
+            AddRoundedRectPath(chipPath, chip, chip.Height * 0.5f);
+            graphics.FillPath(&chipBrush, &chipPath);
+            Pen chipBorder(GdiColor(borderColor, borderAlpha),
+                           std::max(1.0f, m_scale));
+            graphics.DrawPath(&chipBorder, &chipPath);
+
+            const std::wstring label =
+                ToWString(kChooserMinutes[i]) + L" 分钟";
+            SolidBrush text(selected ? Color(245, 44, 30, 24)
+                                     : Color(hovered ? 242 : 225, 250, 250, 252));
+            graphics.DrawString(label.c_str(), static_cast<INT>(label.length()),
+                                font, chip, &format, &text);
+        }
+        break;
+    }
+    case SCREENSAVER_BG_LANDSCAPE:
+    default:
+    {
+        // Understated wide strip: translucent dark material, thin dividers and a
+        // subtle underline for the selected option.
+        SolidBrush fill(Color(205, 8, 12, 20));
+        GraphicsPath path;
+        AddRoundedRectPath(path, panel, 12.0f * m_scale);
+        graphics.FillPath(&fill, &path);
+        Pen border(Color(70, 255, 255, 255), std::max(1.0f, m_scale));
+        graphics.DrawPath(&border, &path);
+
+        const int padding = RoundToInt(kChooserPaddingDip * m_scale);
+        for (int i = 1; i < kChooserOptionCount; ++i)
+        {
+            const RECT optionRect = ChooserOptionRect(i);
+            const REAL x = static_cast<REAL>(optionRect.left);
+            Pen divider(Color(42, 255, 255, 255), std::max(1.0f, m_scale));
+            graphics.DrawLine(
+                &divider,
+                PointF(x, panel.Y + padding + 6.0f * m_scale),
+                PointF(x, panel.Y + panel.Height - padding - 6.0f * m_scale));
+        }
+
+        for (int i = 0; i < kChooserOptionCount; ++i)
+        {
+            const RECT optionRect = ChooserOptionRect(i);
+            const RectF option(
+                static_cast<REAL>(optionRect.left),
+                static_cast<REAL>(optionRect.top),
+                static_cast<REAL>(optionRect.right - optionRect.left),
+                static_cast<REAL>(optionRect.bottom - optionRect.top));
+            const bool hovered = m_chooserHovered == i;
+            const bool selected = i == defaultIndex;
+            if (hovered)
+            {
+                SolidBrush highlight(Color(20, 255, 255, 255));
+                GraphicsPath highlightPath;
+                AddRoundedRectPath(highlightPath, option, 8.0f * m_scale);
+                graphics.FillPath(&highlight, &highlightPath);
+            }
+            const std::wstring label =
+                ToWString(kChooserMinutes[i]) + L" 分钟";
+            SolidBrush text(selected ? Color(238, 246, 246, 248)
+                                     : Color(hovered ? 235 : 205, 235, 236, 240));
+            graphics.DrawString(label.c_str(), static_cast<INT>(label.length()),
+                                font, option, &format, &text);
+            if (selected)
+            {
+                const REAL underlineWidth = 26.0f * m_scale;
+                const REAL underlineHeight = std::max(1.5f, 2.0f * m_scale);
+                const RectF underline(
+                    option.X + (option.Width - underlineWidth) / 2.0f,
+                    option.Y + option.Height - 8.0f * m_scale, underlineWidth,
+                    underlineHeight);
+                SolidBrush line(Color(195, 236, 236, 240));
+                graphics.FillRectangle(&line, underline);
+            }
+        }
+        break;
+    }
+    }
 }
 
 void RestOverlay::DrawProgress(Graphics& graphics)
@@ -2063,12 +2384,15 @@ void RestOverlay::DrawProgress(Graphics& graphics)
         }
     }
 
+    if (!m_controlsVisible)
+        return; // idle state: the progress bar stays, the countdown text hides
+
     const RECT textRect = RemainingTextRect();
     const std::wstring label = L"剩余 " + FormatClock(secondsLeft);
     Font* font = GetFont(std::max(6, RoundToInt(12.5f * m_scale)), false, false,
                          true);
     StringFormat format;
-    format.SetAlignment(StringAlignmentFar);
+    format.SetAlignment(StringAlignmentCenter);
     format.SetLineAlignment(StringAlignmentCenter);
     format.SetFormatFlags(StringFormatFlagsNoWrap);
     const RectF text(static_cast<REAL>(textRect.left),
@@ -2108,9 +2432,14 @@ void RestOverlay::ComposeFrame()
     m_graphics->DrawImage(m_background, 0, 0, m_widthPx, m_heightPx);
     DrawQuote(*m_graphics);
     DrawTimeBlock(*m_graphics);
-    DrawExtendButton(*m_graphics);
     DrawProgress(*m_graphics);
-    DrawSkipButton(*m_graphics);
+    if (m_controlsVisible)
+    {
+        DrawSkipButton(*m_graphics);
+        DrawExtendButton(*m_graphics);
+        if (m_chooserOpen)
+            DrawChooser(*m_graphics);
+    }
     m_lastMinuteKey = CurrentMinuteKey();
 }
 
@@ -2271,14 +2600,21 @@ void RestOverlay::PresentRegion(const RECT& dirty)
     UpdateLayeredWindowIndirect(m_hwnd, &info);
 }
 
-void RestOverlay::UpdateSkipRegion()
+void RestOverlay::UpdateControlsRegion(bool includeChooserArea)
 {
-    RECT expanded = SkipRect();
-    InflateRect(&expanded, RoundToInt(8.0f * m_scale),
-                RoundToInt(8.0f * m_scale));
-    RestoreRegion(*m_graphics, expanded);
-    DrawSkipButton(*m_graphics);
-    PresentRegion(expanded);
+    // Repaint only the countdown / button / chooser area. The background is
+    // restored from the cached bitmap - it is never re-rendered.
+    RECT region = ControlsRegionRect(includeChooserArea);
+    RestoreRegion(*m_graphics, region);
+    DrawProgress(*m_graphics); // the bar (and the text while controls are shown)
+    if (m_controlsVisible)
+    {
+        DrawSkipButton(*m_graphics);
+        DrawExtendButton(*m_graphics);
+        if (m_chooserOpen)
+            DrawChooser(*m_graphics);
+    }
+    PresentRegion(region);
 }
 
 void RestOverlay::UpdateTimeRegion()
@@ -2289,44 +2625,85 @@ void RestOverlay::UpdateTimeRegion()
     PresentRegion(expanded);
 }
 
-void RestOverlay::UpdateExtendRegion()
-{
-    RECT expanded = ExtendRect();
-    InflateRect(&expanded, 12, 12);
-    RestoreRegion(*m_graphics, expanded);
-    DrawExtendButton(*m_graphics);
-    PresentRegion(expanded);
-}
-
 void RestOverlay::UpdateProgressRegion()
 {
     RECT region = ProgressRect();
     RestoreRegion(*m_graphics, region);
     DrawProgress(*m_graphics);
-    // The inflated progress region overlaps the left edge of the "跳过" button.
-    DrawSkipButton(*m_graphics);
+    // The progress region can overlap the button group / chooser popup, so
+    // repaint those as well. This keeps the chooser fully painted (no clipped
+    // leftmost option) while still only presenting the progress rectangle.
+    if (m_controlsVisible)
+    {
+        DrawSkipButton(*m_graphics);
+        DrawExtendButton(*m_graphics);
+        if (m_chooserOpen)
+            DrawChooser(*m_graphics);
+    }
     PresentRegion(region);
 }
 
 void RestOverlay::UpdateHover(POINT point)
 {
-    const int hit = HitTest(point);
-    if (hit == m_hovered)
+    if (!m_controlsVisible)
+    {
+        if (m_hovered != 0 || m_chooserHovered != -1)
+        {
+            m_hovered = 0;
+            m_chooserHovered = -1;
+        }
         return;
-    const int previous = m_hovered;
-    m_hovered = hit;
-    if (previous == 1 || hit == 1)
-        UpdateSkipRegion();
-    if (previous == 2 || hit == 2)
-        UpdateExtendRegion();
+    }
+
+    const int previousHovered = m_hovered;
+    const int previousChooser = m_chooserHovered;
+    m_hovered = 0;
+    m_chooserHovered = -1;
+
+    if (m_chooserOpen)
+    {
+        for (int i = 0; i < kChooserOptionCount; ++i)
+        {
+            const RECT option = ChooserOptionRect(i);
+            if (point.x >= option.left && point.x < option.right &&
+                point.y >= option.top && point.y < option.bottom)
+            {
+                m_chooserHovered = i;
+                break;
+            }
+        }
+    }
+    else
+    {
+        const int hit = HitTest(point);
+        if (hit == 1 || hit == 2)
+            m_hovered = hit;
+    }
+
+    if (m_hovered != previousHovered || m_chooserHovered != previousChooser)
+        UpdateControlsRegion();
 }
 
 int RestOverlay::HitTest(POINT point) const
 {
+    if (!m_controlsVisible)
+        return 0; // hidden buttons are not clickable
+
     const auto inside = [&point](const RECT& rect) {
         return point.x >= rect.left && point.x < rect.right &&
                point.y >= rect.top && point.y < rect.bottom;
     };
+
+    if (m_chooserOpen)
+    {
+        for (int i = 0; i < kChooserOptionCount; ++i)
+        {
+            if (inside(ChooserOptionRect(i)))
+                return 3 + i;
+        }
+        return 0; // click elsewhere closes the chooser
+    }
+
     if (inside(SkipRect()))
         return 1;
     if (inside(ExtendRect()))
@@ -2337,63 +2714,113 @@ int RestOverlay::HitTest(POINT point) const
 void RestOverlay::OnMouseLeave()
 {
     m_trackingMouse = false;
-    if (m_hovered == 0)
+    if (m_hovered == 0 && m_chooserHovered == -1)
         return;
-    const int previous = m_hovered;
     m_hovered = 0;
-    if (previous == 1)
-        UpdateSkipRegion();
-    if (previous == 2)
-        UpdateExtendRegion();
+    m_chooserHovered = -1;
+    if (m_controlsVisible)
+        UpdateControlsRegion();
 }
 
 void RestOverlay::OnLButtonDown(POINT point)
 {
+    m_lastMouseMoveTick = NowMs();
+
+    // While idle-hidden the first click only reveals the controls.
+    if (!m_controlsVisible)
+    {
+        m_controlsVisible = true;
+        m_hovered = 0;
+        m_chooserHovered = -1;
+        UpdateControlsRegion();
+        SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+        return;
+    }
+
+    if (m_chooserOpen)
+    {
+        const int hit = HitTest(point);
+        if (hit >= 3)
+        {
+            m_chooserPressed = hit;
+            SetCapture(m_hwnd);
+            UpdateControlsRegion();
+        }
+        else
+        {
+            // Click outside the chooser: just close it.
+            m_chooserOpen = false;
+            m_chooserHovered = -1;
+            UpdateControlsRegion(true);
+        }
+        return;
+    }
+
     const int hit = HitTest(point);
-    if (hit == 0)
+    if (hit != 1 && hit != 2)
     {
         m_pressed = 0;
         return;
     }
     m_pressed = hit;
     SetCapture(m_hwnd);
-    if (hit == 1)
-        UpdateSkipRegion();
-    else
-        UpdateExtendRegion();
+    UpdateControlsRegion();
 }
 
-void RestOverlay::ExtendDuration()
+void RestOverlay::ExtendDurationBy(int minutes)
 {
-    m_endTick += static_cast<ULONGLONG>(ExtendMinutes()) * 60ULL * 1000ULL;
+    const int safe = ClampInt(minutes, 1, 120);
+    m_endTick += static_cast<ULONGLONG>(safe) * 60ULL * 1000ULL;
     m_lastRemainingSeconds = -1;
     UpdateProgressRegion();
+
+    // Keep the settings page's "延长时间" option meaningful: remember the last
+    // chooser choice (also used as the highlighted default next time).
+    g_settings.screensaverExtendMinutes =
+        ClampInt(safe, kScreensaverExtendMinMinutes, kScreensaverExtendMaxMinutes);
+    SaveSettings();
 }
 
 void RestOverlay::OnLButtonUp(POINT point)
 {
+    m_lastMouseMoveTick = NowMs();
+
+    if (m_chooserPressed >= 3)
+    {
+        const int option = m_chooserPressed - 3;
+        m_chooserPressed = 0;
+        if (GetCapture() == m_hwnd)
+            ReleaseCapture();
+        const bool overOption = HitTest(point) == 3 + option;
+        m_chooserOpen = false;
+        m_chooserHovered = -1;
+        if (overOption && option >= 0 && option < kChooserOptionCount)
+            ExtendDurationBy(kChooserMinutes[option]);
+        UpdateControlsRegion(true);
+        return;
+    }
+
     const int pressed = m_pressed;
     m_pressed = 0;
     if (GetCapture() == m_hwnd)
         ReleaseCapture();
-    const int hit = HitTest(point);
-    if (pressed != 0 && pressed == hit)
+
+    if (pressed == 1 || pressed == 2)
     {
-        if (hit == 1)
+        if (HitTest(point) == pressed)
         {
-            ExitOverlayNow();
+            if (pressed == 1)
+            {
+                ExitOverlayNow();
+                return;
+            }
+            m_chooserOpen = true;
+            m_chooserHovered = -1;
+            UpdateControlsRegion();
             return;
         }
-        if (hit == 2)
-        {
-            ExtendDuration();
-            return;
-        }
+        UpdateControlsRegion();
     }
-    if (pressed == 1)
-        UpdateSkipRegion();
-    if (pressed == 2)
-        UpdateExtendRegion();
 }
 
 void RestOverlay::OnClockTick()
@@ -2408,6 +2835,21 @@ void RestOverlay::OnClockTick()
     }
     if (m_fadeActive)
         return; // the progress text is already correct in the first frame
+
+    // Idle-hide the interaction chrome (countdown text + buttons + chooser).
+    // The chooser is closed too: after 1 s without mouse movement only the
+    // background, quote, time and progress bar remain.
+    if (m_controlsVisible &&
+        now - m_lastMouseMoveTick >= kControlsIdleHideMs)
+    {
+        m_controlsVisible = false;
+        m_hovered = 0;
+        m_chooserOpen = false;
+        m_chooserHovered = -1;
+        UpdateControlsRegion(true); // include + erase the chooser popup
+        SetCursor(nullptr);
+    }
+
     const ULONGLONG minuteKey = CurrentMinuteKey();
     if (minuteKey != m_lastMinuteKey)
     {
@@ -2456,6 +2898,11 @@ bool RestOverlay::Create(HWND owner, int backgroundMode)
     m_hovered = 0;
     m_pressed = 0;
     m_trackingMouse = false;
+    m_controlsVisible = true;
+    m_chooserOpen = false;
+    m_chooserHovered = -1;
+    m_chooserPressed = 0;
+    m_lastMouseMoveTick = NowMs();
     m_fadeActive = false;
     m_currentAlpha = 0;
     m_lastRemainingSeconds = -1;
@@ -2483,6 +2930,10 @@ bool RestOverlay::Create(HWND owner, int backgroundMode)
         return false;
     }
 
+    const ULONGLONG now = NowMs();
+    m_startTick = now;
+    m_endTick = now + static_cast<ULONGLONG>(DurationSeconds()) * 1000ULL;
+
     RenderBackground();
     ComposeFrame();
     if (g_testMode)
@@ -2499,9 +2950,6 @@ bool RestOverlay::Create(HWND owner, int backgroundMode)
     SetWindowPos(m_hwnd, HWND_TOPMOST, m_origin.x, m_origin.y, m_widthPx,
                  m_heightPx, SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
-    const ULONGLONG now = NowMs();
-    m_startTick = now;
-    m_endTick = now + static_cast<ULONGLONG>(DurationSeconds()) * 1000ULL;
     m_currentAlpha = 255;
     if (!g_testMode)
     {
@@ -2605,6 +3053,13 @@ LRESULT RestOverlay::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
             m_trackingMouse = true;
         }
         POINT point = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        m_lastMouseMoveTick = NowMs();
+        if (!m_controlsVisible)
+        {
+            m_controlsVisible = true;
+            UpdateControlsRegion();
+            SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+        }
         UpdateHover(point);
         return 0;
     }
@@ -2628,14 +3083,11 @@ LRESULT RestOverlay::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
     }
 
     case WM_CAPTURECHANGED:
-        if (m_pressed != 0)
+        if (m_pressed != 0 || m_chooserPressed != 0)
         {
-            const int pressed = m_pressed;
             m_pressed = 0;
-            if (pressed == 1)
-                UpdateSkipRegion();
-            if (pressed == 2)
-                UpdateExtendRegion();
+            m_chooserPressed = 0;
+            UpdateControlsRegion();
         }
         return 0;
 
@@ -2650,6 +3102,11 @@ LRESULT RestOverlay::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
     case WM_SETCURSOR:
         if (LOWORD(lParam) == HTCLIENT)
         {
+            if (!m_controlsVisible)
+            {
+                SetCursor(nullptr);
+                return TRUE;
+            }
             POINT point = {};
             GetCursorPos(&point);
             ScreenToClient(m_hwnd, &point);
@@ -2660,6 +3117,9 @@ LRESULT RestOverlay::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         break;
 
     case WM_DISPLAYCHANGE:
+        ExitOverlayNow();
+        return 0;
+
     case WM_DPICHANGED:
         ExitOverlayNow();
         return 0;
@@ -2880,7 +3340,9 @@ void ScreensaverOnTick()
     if (g_overlay.IsActive())
     {
         if (g_settings.screensaverBlockInGame && IsGameFullscreenActive())
+        {
             ExitOverlayNow();
+        }
         return;
     }
 
@@ -2964,6 +3426,17 @@ void ScreensaverApplySettings()
 bool IsScreensaverActive()
 {
     return g_overlay.IsActive();
+}
+
+void StartScreensaverNow()
+{
+    if (!g_initialised)
+        return;
+    if (g_overlay.IsActive())
+        return;
+    if (IsGameBlocking())
+        return;
+    EnterOverlayNow();
 }
 
 bool IsScreensaverNoticeVisible()

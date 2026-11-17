@@ -59,9 +59,9 @@ int s_hoveredSub = -1;
 bool s_lastNotifyEnable = false;
 
 // --- v5.4 hover feature row -------------------------------------------------
-// Only the "会议 / 视频纪要" slot is enabled today; the layout reserves room for
-// up to four so adding more features later needs no geometry change.
-constexpr int kEnabledFeatureSlots = 1;
+// Slot 0 = "会议 / 视频纪要", slot 1 = "屏保" (v5.6). The layout reserves room
+// for up to four slots so more features need no geometry change.
+constexpr int kEnabledFeatureSlots = 2;
 constexpr UINT kTimerRecordingPulse = 7; // local to the island window
 constexpr UINT kTimerIslandToast = 8;
 constexpr int kRecordingPulseMs = 50;
@@ -1097,6 +1097,14 @@ void ShowRecordingFlow()
 
 void OnFeatureSlotClicked(int slot)
 {
+    if (slot == 1)
+    {
+        // v5.6: the screensaver icon enters the overlay directly (the module
+        // itself ignores the click when the overlay is active or a fullscreen
+        // game blocks it).
+        StartScreensaverNow();
+        return;
+    }
     if (slot != 0)
         return;
     if (s_countdownActive)
@@ -1155,8 +1163,12 @@ void ForceHoverRowForTest()
     s_hovering = true;
     SetIslandHoverTarget(true);
     SetFeatureRowVisibleTarget(true);
-    s_hoveredFeatureSlot = 0;
-    SetFeatureRowInfo(kEnabledFeatureSlots, 0);
+    // --test-hover-row          -> highlight slot 0 (meeting notes)
+    // --test-hover-screensaver  -> highlight slot 1 (screensaver moon)
+    const int hoveredSlot =
+        wcsstr(GetCommandLineW(), L"--test-hover-screensaver") != nullptr ? 1 : 0;
+    s_hoveredFeatureSlot = hoveredSlot;
+    SetFeatureRowInfo(kEnabledFeatureSlots, hoveredSlot);
     FinishIslandAnimation();
     InvalidateIslandContent();
     RenderIslandFrame(true);
