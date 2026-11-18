@@ -27,6 +27,14 @@ struct SummaryResult
     std::wstring failureSummary;     // short human readable list of kept chunks
 };
 
+// Quick pre-flight probe for the local transcription service (v5.6.1).
+// Only probes loopback endpoints on port 8000 (the Paraformer deployment):
+// GET {origin}/health with short timeouts. Returns false when the service is
+// down or unhealthy; non-loopback / non-8000 endpoints always return true
+// (the app makes no assumption about their /health route).
+bool ProbeLocalTranscriptionHealth(const std::wstring& apiBase,
+                                   std::wstring* detail = nullptr);
+
 // Transcribe the given (temporary) audio file (m4a/wav) chunk by chunk and,
 // when markdownPath is not empty, summarize the transcript into a Markdown
 // meeting note. Large recordings are decoded and split into 16 kHz mono WAV

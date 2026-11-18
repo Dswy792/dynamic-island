@@ -1337,6 +1337,116 @@ std::wstring BuildFailureNote(const std::wstring& sessionName,
 
 } // namespace
 
+bool ProbeLocalTranscriptionHealth(const std::wstring& apiBase,
+                                   std::wstring* detail)
+{
+    if (detail != nullptr)
+        detail->clear();
+
+    std::wstring normalized;
+    std::wstring parseError;
+    if (!NormalizeBaseUrl(apiBase, &normalized, &parseError))
+        return true; // let the normal request path report configuration errors
+
+    URL_COMPONENTS base = {};
+    if (!CrackUrl(normalized, &base, nullptr))
+        return true;
+    std::wstring host(base.lpszHostName, base.dwHostNameLength);
+    if (!IsLoopbackHost(host) || base.nPort != 8000)
+        return true; // only the bundled local Paraformer service has /health
+
+    const size_t schemeEnd = normalized.find(L"://");
+    if (schemeEnd == std::wstring::npos)
+        return true;
+    const size_t pathStart = normalized.find(L'/', schemeEnd + 3);
+    const std::wstring origin = pathStart == std::wstring::npos
+                                    ? normalized
+                                    : normalized.substr(0, pathStart);
+    const std::wstring healthUrl = origin + L"/health";
+
+    URL_COMPONENTS health = {};
+    if (!CrackUrl(healthUrl, &health, nullptr))
+        return true;
+    std::wstring healthHost(health.lpszHostName, health.dwHostNameLength);
+    std::wstring connectHost = healthHost;
+    if (connectHost.size() >= 2 && connectHost.front() == L'[' &&
+        connectHost.back() == L']')
+        connectHost = connectHost.substr(1, connectHost.size() - 2);
+    const std::wstring path = UrlPathOf(health);
+    const bool secure = health.nScheme == INTERNET_SCHEME_HTTPS;
+
+    HINTERNET session = WinHttpOpen(
+        L"DynamicIsland/5.6", WINHTTP_ACCESS_TYPE_NO_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (session == nullptr)
+    {
+        if (detail != nullptr)
+            *detail = L"无法初始化本地健康检查";
+        return false;
+    }
+    WinHttpSetTimeouts(session, 800, 800, 800, 1000);
+
+    HINTERNET connection = WinHttpConnect(session, connectHost.c_str(),
+                                          health.nPort, 0);
+    if (connection == nullptr)
+    {
+        const DWORD code = GetLastError();
+        if (detail != nullptr)
+            *detail = L"无法连接本地转写服务（错误码 " +
+                      std::to_wstring(code) + L"）";
+        WinHttpCloseHandle(session);
+        return false;
+    }
+
+    HINTERNET request = WinHttpOpenRequest(
+        connection, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER,
+        WINHTTP_DEFAULT_ACCEPT_TYPES, secure ? WINHTTP_FLAG_SECURE : 0);
+    if (request == nullptr)
+    {
+        const DWORD code = GetLastError();
+        if (detail != nullptr)
+            *detail = L"无法创建本地健康检查请求（错误码 " +
+                      std::to_wstring(code) + L"）";
+        WinHttpCloseHandle(connection);
+        WinHttpCloseHandle(session);
+        return false;
+    }
+
+    BOOL ok = WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                 WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    if (ok)
+        ok = WinHttpReceiveResponse(request, nullptr);
+    DWORD status = 0;
+    DWORD statusSize = sizeof(status);
+    if (ok)
+    {
+        WinHttpQueryHeaders(request,
+                            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSize,
+                            WINHTTP_NO_HEADER_INDEX);
+    }
+    const DWORD lastError = ok ? 0 : GetLastError();
+    WinHttpCloseHandle(request);
+    WinHttpCloseHandle(connection);
+    WinHttpCloseHandle(session);
+
+    if (!ok)
+    {
+        if (detail != nullptr)
+            *detail = L"无法连接本地转写服务（错误码 " +
+                      std::to_wstring(lastError) + L"）";
+        return false;
+    }
+    if (status < 200 || status >= 300)
+    {
+        if (detail != nullptr)
+            *detail = L"本地转写服务健康检查返回 HTTP " +
+                      std::to_wstring(status);
+        return false;
+    }
+    return true;
+}
+
 // ===========================================================================
 // Public entry point
 // ===========================================================================

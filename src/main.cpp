@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cwchar>
 #include <string>
 
@@ -23,6 +24,7 @@
 #include "screensaver.h"
 #include "settings.h"
 #include "settings_dialog.h"
+#include "summary.h"
 #include "theme.h"
 #include "time_format.h"
 #include "tray.h"
@@ -978,6 +980,17 @@ void RefreshRecordingPulse()
 // --- 3 second countdown + starting the recorder ---------------------------
 void OnRecordingDialogAction(int limitSeconds, void* context);
 
+// v5.6.1: pre-flight check for the bundled local Paraformer service. Only the
+// loopback:8000 endpoint is probed (see summary.cpp); cloud endpoints pass.
+bool EnsureLocalTranscriptionServiceReady()
+{
+    std::wstring detail;
+    if (ProbeLocalTranscriptionHealth(g_settings.aiApiBase, &detail))
+        return true;
+    ShowIslandToast(L"本地转写服务未启动，请先运行 start-server.cmd", true);
+    return false;
+}
+
 void UpdateCountdownText()
 {
     wchar_t buffer[64] = {};
@@ -995,6 +1008,8 @@ void StartRecordingCountdown(int limitSeconds)
         ShowRecordingConfigNoticeDialog(g_hwnd, &OnRecordingDialogAction, nullptr);
         return;
     }
+    if (!s_testRecordStart && !EnsureLocalTranscriptionServiceReady())
+        return;
 
     s_pendingLimitSeconds = limitSeconds;
     s_countdownRemaining = std::max(1, kRecordingCountdownSeconds);
@@ -1121,6 +1136,8 @@ void OnFeatureSlotClicked(int slot)
         ShowRecordingConfigNoticeDialog(g_hwnd, &OnRecordingDialogAction, nullptr);
         return;
     }
+    if (!EnsureLocalTranscriptionServiceReady())
+        return;
     ShowRecordingFlow();
 }
 
@@ -1220,6 +1237,27 @@ void RunRecordingTestHooks(LPCWSTR commandLine)
     {
         s_testRecordStart = true;
         StartRecordingCountdown(TestLimitFromEnvironment());
+    }
+
+    if (wcsstr(commandLine, L"--test-asr-health") != nullptr)
+    {
+        std::wstring detail;
+        const bool ok = ProbeLocalTranscriptionHealth(g_settings.aiApiBase, &detail);
+        const std::wstring title =
+            ok ? L"ASR_HEALTH_OK" : L"ASR_HEALTH_FAIL: " + detail;
+        SetWindowTextW(g_hwnd, title.c_str());
+
+        wchar_t logPath[MAX_PATH] = {};
+        if (GetEnvironmentVariableW(L"DSH_ASR_HEALTH_LOG", logPath, MAX_PATH) > 0)
+        {
+            FILE* file = nullptr;
+            if (_wfopen_s(&file, logPath, L"w, ccs=UTF-8") == 0 && file != nullptr)
+            {
+                fwprintf(file, L"%s\n%s\n", ok ? L"OK" : L"FAIL",
+                         detail.c_str());
+                fclose(file);
+            }
+        }
     }
 }
 
