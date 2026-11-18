@@ -48,6 +48,8 @@ RECT s_dragStartCapsule = {};
 bool s_hiddenByFullscreen = false;
 bool s_hiddenByScreensaver = false;
 ULONGLONG s_lastInsideTick = 0;
+bool s_asrAutoStartPending = false;
+ULONGLONG s_asrAutoStartTick = 0;
 int s_contentTickCount = 0;
 UINT s_taskbarCreatedMessage = 0;
 
@@ -980,14 +982,65 @@ void RefreshRecordingPulse()
 // --- 3 second countdown + starting the recorder ---------------------------
 void OnRecordingDialogAction(int limitSeconds, void* context);
 
-// v5.6.1: pre-flight check for the bundled local Paraformer service. Only the
+// v5.6.2: pre-flight check for the bundled local Paraformer service. Only the
 // loopback:8000 endpoint is probed (see summary.cpp); cloud endpoints pass.
+// When the service is down the app starts start-server.cmd hidden, tells the
+// user it is warming up, and refuses to record until a later click passes the
+// probe (model loading takes ~40 s, so recording immediately would fail).
+constexpr ULONGLONG kAsrAutoStartCooldownMs = 90000;
+
+bool StartBundledTranscriptionService()
+{
+    const wchar_t* kServerScript = L"D:\\AI\\paraformer-asr\\start-server.cmd";
+    if (GetFileAttributesW(kServerScript) == INVALID_FILE_ATTRIBUTES)
+        return false;
+
+    std::wstring commandLine =
+        std::wstring(L"cmd.exe /c \"\"") + kServerScript + L"\"\"";
+    STARTUPINFOW startup = {};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process = {};
+    const BOOL created =
+        CreateProcessW(nullptr, commandLine.data(), nullptr, nullptr, FALSE,
+                       CREATE_NO_WINDOW, nullptr,
+                       L"D:\\AI\\paraformer-asr\\", &startup, &process);
+    if (!created)
+        return false;
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return true;
+}
+
 bool EnsureLocalTranscriptionServiceReady()
 {
     std::wstring detail;
     if (ProbeLocalTranscriptionHealth(g_settings.aiApiBase, &detail))
+    {
+        s_asrAutoStartPending = false;
         return true;
-    ShowIslandToast(L"本地转写服务未启动，请先运行 start-server.cmd", true);
+    }
+
+    const ULONGLONG now = GetTickCount64();
+    if (s_asrAutoStartPending &&
+        now - s_asrAutoStartTick < kAsrAutoStartCooldownMs)
+    {
+        ShowIslandToast(L"本地转写服务正在启动，请稍候再试", true);
+        return false;
+    }
+
+    if (StartBundledTranscriptionService())
+    {
+        s_asrAutoStartPending = true;
+        s_asrAutoStartTick = now;
+        ShowIslandToast(
+            L"本地转写服务未启动，已自动启动，请约 40 秒后再点录制", true);
+    }
+    else
+    {
+        s_asrAutoStartPending = false;
+        ShowIslandToast(
+            L"自动启动失败，请手动运行 start-server.cmd", true);
+    }
     return false;
 }
 
@@ -1238,6 +1291,9 @@ void RunRecordingTestHooks(LPCWSTR commandLine)
         s_testRecordStart = true;
         StartRecordingCountdown(TestLimitFromEnvironment());
     }
+
+    if (wcsstr(commandLine, L"--test-record-click") != nullptr)
+        OnFeatureSlotClicked(0);
 
     if (wcsstr(commandLine, L"--test-asr-health") != nullptr)
     {
