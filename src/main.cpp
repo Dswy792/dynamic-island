@@ -27,6 +27,7 @@
 #include "summary.h"
 #include "theme.h"
 #include "time_format.h"
+#include "timer_window.h"
 #include "tray.h"
 #include "version.h"
 
@@ -63,9 +64,10 @@ int s_hoveredSub = -1;
 bool s_lastNotifyEnable = false;
 
 // --- v5.4 hover feature row -------------------------------------------------
-// Slot 0 = "会议 / 视频纪要", slot 1 = "屏保" (v5.6). The layout reserves room
-// for up to four slots so more features need no geometry change.
-constexpr int kEnabledFeatureSlots = 2;
+// Slot 0 = "会议 / 视频纪要", slot 1 = "屏保" (v5.6), slot 2 = "计时器"
+// (v5.7). The layout reserves room for four slots so no geometry changes are
+// needed when more features are added.
+constexpr int kEnabledFeatureSlots = 3;
 constexpr UINT kTimerRecordingPulse = 7; // local to the island window
 constexpr UINT kTimerIslandToast = 8;
 constexpr int kRecordingPulseMs = 50;
@@ -1165,6 +1167,20 @@ void ShowRecordingFlow()
 
 void OnFeatureSlotClicked(int slot)
 {
+    if (slot == 2)
+    {
+        // v5.7: open / focus the timer panel and hide the hover row.
+        s_hovering = false;
+        s_hoverLeavePending = false;
+        SetIslandHoverTarget(false);
+        SetFeatureRowVisibleTarget(false);
+        s_hoveredFeatureSlot = -1;
+        SetFeatureRowInfo(kEnabledFeatureSlots, -1);
+        InvalidateIslandContent();
+        RenderIslandFrame(true);
+        ShowTimerWindow(g_hwnd);
+        return;
+    }
     if (slot == 1)
     {
         // v5.6: the screensaver icon enters the overlay directly (the module
@@ -1235,8 +1251,12 @@ void ForceHoverRowForTest()
     SetFeatureRowVisibleTarget(true);
     // --test-hover-row          -> highlight slot 0 (meeting notes)
     // --test-hover-screensaver  -> highlight slot 1 (screensaver moon)
-    const int hoveredSlot =
-        wcsstr(GetCommandLineW(), L"--test-hover-screensaver") != nullptr ? 1 : 0;
+    // --test-hover-timer        -> highlight slot 2 (timer stopwatch)
+    int hoveredSlot = 0;
+    if (wcsstr(GetCommandLineW(), L"--test-hover-screensaver") != nullptr)
+        hoveredSlot = 1;
+    else if (wcsstr(GetCommandLineW(), L"--test-hover-timer") != nullptr)
+        hoveredSlot = 2;
     s_hoveredFeatureSlot = hoveredSlot;
     SetFeatureRowInfo(kEnabledFeatureSlots, hoveredSlot);
     FinishIslandAnimation();
@@ -1754,6 +1774,12 @@ LRESULT CALLBACK IslandWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
         HandleNotificationMessage(wParam, lParam);
         return 0;
 
+    case kMsgTimerFinished:
+        // The countdown reached zero: keep the timer module's state, just tell
+        // the user through the island toast.
+        ShowIslandToast(L"倒计时结束", false);
+        return 0;
+
     case kTrayCallbackMessage:
         HandleTrayCallback(wParam, lParam);
         return 0;
@@ -1774,6 +1800,7 @@ LRESULT CALLBACK IslandWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
         s_recordingPulseTimerRunning = false;
         s_toastTimerRunning = false;
         ShutdownScreensaver();
+        ShutdownTimerWindow();
         // Best effort: let the recorder finalise the audio file on exit.
         if (CurrentRecorderState() != RecorderState::Idle)
             RecorderStop();
@@ -2043,6 +2070,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     InitIslandRenderer(g_hwnd);
     SetFeatureRowInfo(kEnabledFeatureSlots, -1);
     InitScreensaver(g_hwnd);
+    InitTimerWindow(g_hwnd);
 
     s_taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
     s_lastInsideTick = GetTickCount64();

@@ -655,6 +655,47 @@ void DrawMoonGlyph(Graphics& graphics, const RectF& iconRect, COLORREF color,
                                dotRadius * 2.0f, dotRadius * 2.0f));
 }
 
+// Stopwatch glyph used by the "计时器" feature icon.
+void DrawStopwatchGlyph(Graphics& graphics, const RectF& iconRect, COLORREF color,
+                        BYTE alpha)
+{
+    if (iconRect.Width < 4.0f || iconRect.Height < 4.0f || alpha == 0)
+        return;
+
+    const REAL w = iconRect.Width;
+    const REAL h = iconRect.Height;
+    const REAL radius = std::min(w, h) * 0.27f;
+    const REAL centerX = iconRect.X + w * 0.5f;
+    const REAL centerY = iconRect.Y + h * 0.56f;
+    Pen pen(GdiColor(color, alpha), std::max(1.2f, w * 0.075f));
+    pen.SetLineJoin(LineJoinRound);
+
+    graphics.DrawEllipse(&pen,
+                         RectF(centerX - radius, centerY - radius, radius * 2.0f,
+                               radius * 2.0f));
+    // Crown (top button) and side button.
+    graphics.DrawLine(&pen, PointF(centerX, centerY - radius - h * 0.10f),
+                      PointF(centerX, centerY - radius + h * 0.02f));
+    graphics.DrawLine(&pen, PointF(centerX - w * 0.07f,
+                                   centerY - radius - h * 0.10f),
+                      PointF(centerX + w * 0.07f,
+                             centerY - radius - h * 0.10f));
+    graphics.DrawLine(&pen, PointF(centerX + radius * 0.72f,
+                                   centerY - radius * 0.72f),
+                      PointF(centerX + radius * 1.04f,
+                             centerY - radius * 1.04f));
+    // Hands.
+    graphics.DrawLine(&pen, PointF(centerX, centerY),
+                      PointF(centerX, centerY - radius * 0.58f));
+    graphics.DrawLine(&pen, PointF(centerX, centerY),
+                      PointF(centerX + radius * 0.46f,
+                             centerY + radius * 0.12f));
+    SolidBrush dot(GdiColor(color, alpha));
+    const REAL dotRadius = std::max(1.0f, w * 0.055f);
+    graphics.FillEllipse(&dot, RectF(centerX - dotRadius, centerY - dotRadius,
+                                     dotRadius * 2.0f, dotRadius * 2.0f));
+}
+
 void DrawFeatureRow(Graphics& graphics, const IslandClusterGeometry& geometry,
                     const ThemePalette& palette, REAL dpiScale, float progress,
                     int hoveredSlot)
@@ -699,9 +740,12 @@ void DrawFeatureRow(Graphics& graphics, const IslandClusterGeometry& geometry,
         const RectF iconRect(slotRect.X + (slotRect.Width - iconSize) / 2.0f,
                              slotRect.Y + (slotRect.Height - iconSize) / 2.0f,
                              iconSize, iconSize);
-        // Slot 0 = 会议 / 视频纪要 (camera), slot 1 = 屏保 (crescent moon).
+        // Slot 0 = 会议 / 视频纪要 (camera), slot 1 = 屏保 (crescent moon),
+        // slot 2 = 计时器 (stopwatch).
         if (i == 1)
             DrawMoonGlyph(graphics, iconRect, palette.islandText, alpha);
+        else if (i == 2)
+            DrawStopwatchGlyph(graphics, iconRect, palette.islandText, alpha);
         else
             DrawVideoGlyph(graphics, iconRect, palette.islandText, alpha);
     }
