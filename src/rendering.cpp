@@ -600,27 +600,40 @@ void DrawVideoGlyph(Graphics& graphics, const RectF& iconRect, COLORREF color,
 
     const REAL w = iconRect.Width;
     const REAL h = iconRect.Height;
-    const REAL bodyWidth = w * 0.60f;
-    const REAL bodyHeight = h * 0.62f;
-    const RectF body(iconRect.X,
-                     iconRect.Y + (h - bodyHeight) / 2.0f - h * 0.02f, bodyWidth,
-                     bodyHeight);
+    const REAL stroke = std::max(1.6f, w * 0.085f);
+    const REAL bodyWidth = w * 0.58f;
+    const REAL bodyHeight = h * 0.56f;
+    const REAL gap = w * 0.05f;
+    const REAL lensWidth = w * 0.24f;
+    const REAL groupWidth = bodyWidth + gap + lensWidth;
+    // Small optical correction: the painted bounds (outline + lens tip) sit a
+    // hair left of the geometric centre, so bias the group right by ~0.03w.
+    const REAL left = iconRect.X + (w - groupWidth) / 2.0f + w * 0.030f;
+    const REAL top = iconRect.Y + (h - bodyHeight) / 2.0f;
+    const RectF body(left, top, bodyWidth, bodyHeight);
 
-    Pen pen(GdiColor(color, alpha), std::max(1.2f, w * 0.085f));
+    Pen pen(GdiColor(color, alpha), stroke);
     pen.SetLineJoin(LineJoinRound);
-    GraphicsPath* bodyPath = CreateRoundedRectPath(body, bodyHeight * 0.24f);
+    GraphicsPath* bodyPath = CreateRoundedRectPath(body, bodyHeight * 0.22f);
     graphics.DrawPath(&pen, bodyPath);
     delete bodyPath;
 
-    const REAL lensX = body.X + bodyWidth + w * 0.035f;
-    const REAL lensWidth = w * 0.24f;
-    const PointF lensPoints[3] = {PointF(lensX, iconRect.Y + h * 0.31f),
-                                  PointF(lensX + lensWidth, iconRect.Y + h * 0.5f),
-                                  PointF(lensX, iconRect.Y + h * 0.69f)};
+    const REAL lensX = left + bodyWidth + gap;
+    const PointF lensPoints[3] = {PointF(lensX, top + bodyHeight * 0.18f),
+                                  PointF(lensX + lensWidth,
+                                         top + bodyHeight * 0.5f),
+                                  PointF(lensX, top + bodyHeight * 0.82f)};
     GraphicsPath lensPath;
     lensPath.AddPolygon(lensPoints, 3);
     SolidBrush brush(GdiColor(color, alpha));
     graphics.FillPath(&brush, &lensPath);
+
+    // Small lens dot keeps the camera reading as one icon family.
+    const REAL dotRadius = w * 0.050f;
+    graphics.FillEllipse(&brush,
+                         RectF(left + bodyWidth * 0.50f - dotRadius,
+                               top + bodyHeight * 0.5f - dotRadius,
+                               dotRadius * 2.0f, dotRadius * 2.0f));
 }
 
 // Crescent-moon glyph used by the "屏保 / 休息" feature icon.
@@ -632,27 +645,55 @@ void DrawMoonGlyph(Graphics& graphics, const RectF& iconRect, COLORREF color,
 
     const REAL w = iconRect.Width;
     const REAL h = iconRect.Height;
-    const REAL radius = w * 0.40f;
-    const RectF disc(iconRect.X + (w - radius * 2.0f) / 2.0f,
-                     iconRect.Y + (h - radius * 2.0f) / 2.0f, radius * 2.0f,
-                     radius * 2.0f);
+    const REAL centerX = iconRect.X + w * 0.5f;
+    const REAL centerY = iconRect.Y + h * 0.5f;
 
-    GraphicsPath crescent;
-    crescent.AddEllipse(disc);
+    // One outer arc plus one concave cut arc: a classic single crescent (no
+    // second disc silhouette, no star).
+    const REAL radius = w * 0.40f;
     const REAL cutRadius = radius * 0.92f;
-    const REAL cutX = disc.X + radius * 1.08f;
-    const REAL cutY = disc.Y - radius * 0.28f;
-    crescent.AddEllipse(RectF(cutX, cutY, cutRadius * 2.0f, cutRadius * 2.0f));
-    crescent.SetFillMode(FillModeAlternate);
+    const REAL cutOffsetX = radius * 0.78f;
+    const REAL cutOffsetY = -radius * 0.10f;
+    const REAL distance = std::sqrt(cutOffsetX * cutOffsetX +
+                                    cutOffsetY * cutOffsetY);
+    const REAL pi = 3.14159265358979f;
+    const REAL outerBeta = std::acos(std::clamp(
+        (radius * radius + distance * distance - cutRadius * cutRadius) /
+            (2.0f * radius * distance),
+        -1.0f, 1.0f));
+    const REAL cutBeta = std::acos(std::clamp(
+        (cutRadius * cutRadius + distance * distance - radius * radius) /
+            (2.0f * cutRadius * distance),
+        -1.0f, 1.0f));
+    const REAL axisAngle = std::atan2(cutOffsetY, cutOffsetX);
+
+    const RectF outerRect(centerX - radius, centerY - radius, radius * 2.0f,
+                          radius * 2.0f);
+    const RectF cutRect(centerX + cutOffsetX - cutRadius,
+                        centerY + cutOffsetY - cutRadius, cutRadius * 2.0f,
+                        cutRadius * 2.0f);
+
+    GraphicsPath moonPath;
+    moonPath.AddArc(outerRect, (axisAngle + outerBeta) * 180.0f / pi,
+                    360.0f - 2.0f * outerBeta * 180.0f / pi);
+    moonPath.AddArc(cutRect, (axisAngle + pi + cutBeta) * 180.0f / pi,
+                    -2.0f * cutBeta * 180.0f / pi);
+    moonPath.CloseFigure();
+
+    // Centre the actual painted bounds inside the shared icon box.
+    RectF bounds;
+    if (moonPath.GetBounds(&bounds, nullptr) == Ok)
+    {
+        Matrix translate;
+        translate.Translate(centerX - (bounds.X + bounds.Width * 0.5f) +
+                                w * 0.008f,
+                            centerY - (bounds.Y + bounds.Height * 0.5f) +
+                                h * 0.015f);
+        moonPath.Transform(&translate);
+    }
 
     SolidBrush brush(GdiColor(color, alpha));
-    graphics.FillPath(&brush, &crescent);
-
-    // Tiny "star" dot to the upper right of the crescent.
-    const REAL dotRadius = w * 0.055f;
-    graphics.FillEllipse(&brush,
-                         RectF(iconRect.X + w * 0.74f, iconRect.Y + h * 0.18f,
-                               dotRadius * 2.0f, dotRadius * 2.0f));
+    graphics.FillPath(&brush, &moonPath);
 }
 
 // Stopwatch glyph used by the "计时器" feature icon.
@@ -664,34 +705,38 @@ void DrawStopwatchGlyph(Graphics& graphics, const RectF& iconRect, COLORREF colo
 
     const REAL w = iconRect.Width;
     const REAL h = iconRect.Height;
-    const REAL radius = std::min(w, h) * 0.27f;
+    const REAL stroke = std::max(1.8f, w * 0.090f);
+    const REAL radius = w * 0.360f;
     const REAL centerX = iconRect.X + w * 0.5f;
-    const REAL centerY = iconRect.Y + h * 0.56f;
-    Pen pen(GdiColor(color, alpha), std::max(1.2f, w * 0.075f));
+    const REAL centerY = iconRect.Y + h * 0.545f;
+    Pen pen(GdiColor(color, alpha), stroke);
     pen.SetLineJoin(LineJoinRound);
+    pen.SetStartCap(LineCapRound);
+    pen.SetEndCap(LineCapRound);
 
     graphics.DrawEllipse(&pen,
                          RectF(centerX - radius, centerY - radius, radius * 2.0f,
                                radius * 2.0f));
-    // Crown (top button) and side button.
-    graphics.DrawLine(&pen, PointF(centerX, centerY - radius - h * 0.10f),
-                      PointF(centerX, centerY - radius + h * 0.02f));
-    graphics.DrawLine(&pen, PointF(centerX - w * 0.07f,
-                                   centerY - radius - h * 0.10f),
-                      PointF(centerX + w * 0.07f,
-                             centerY - radius - h * 0.10f));
-    graphics.DrawLine(&pen, PointF(centerX + radius * 0.72f,
-                                   centerY - radius * 0.72f),
-                      PointF(centerX + radius * 1.04f,
-                             centerY - radius * 1.04f));
-    // Hands.
+    // Crown (centred top button) with a cap.
+    graphics.DrawLine(&pen, PointF(centerX, centerY - radius - h * 0.12f),
+                      PointF(centerX, centerY - radius + h * 0.01f));
+    graphics.DrawLine(&pen, PointF(centerX - w * 0.12f,
+                                   centerY - radius - h * 0.12f),
+                      PointF(centerX + w * 0.12f,
+                             centerY - radius - h * 0.12f));
+    // Side button at 45°.
+    graphics.DrawLine(&pen, PointF(centerX + radius * 0.68f,
+                                   centerY - radius * 0.68f),
+                      PointF(centerX + radius * 1.02f,
+                             centerY - radius * 1.02f));
+    // Hands and centre dot.
     graphics.DrawLine(&pen, PointF(centerX, centerY),
-                      PointF(centerX, centerY - radius * 0.58f));
+                      PointF(centerX, centerY - radius * 0.56f));
     graphics.DrawLine(&pen, PointF(centerX, centerY),
                       PointF(centerX + radius * 0.46f,
                              centerY + radius * 0.12f));
     SolidBrush dot(GdiColor(color, alpha));
-    const REAL dotRadius = std::max(1.0f, w * 0.055f);
+    const REAL dotRadius = std::max(1.4f, w * 0.062f);
     graphics.FillEllipse(&dot, RectF(centerX - dotRadius, centerY - dotRadius,
                                      dotRadius * 2.0f, dotRadius * 2.0f));
 }
@@ -736,7 +781,8 @@ void DrawFeatureRow(Graphics& graphics, const IslandClusterGeometry& geometry,
             delete highlightPath;
         }
 
-        const REAL iconSize = slotRect.Width * 0.58f;
+        // One shared optical icon box for all feature glyphs.
+        const REAL iconSize = slotRect.Width * 0.68f;
         const RectF iconRect(slotRect.X + (slotRect.Width - iconSize) / 2.0f,
                              slotRect.Y + (slotRect.Height - iconSize) / 2.0f,
                              iconSize, iconSize);
