@@ -34,7 +34,9 @@
 #include <windowsx.h>
 #include <gdiplus.h>
 #include <objbase.h>
+#include <shlobj.h>
 #include <shobjidl.h>
+#include <shellapi.h>
 
 #include <algorithm>
 #include <cmath>
@@ -180,6 +182,11 @@ constexpr int kScreenDurationMinMinutes = 1;
 constexpr int kScreenDurationMaxMinutes = 30;
 constexpr int kScreenIntervalStepMinutes = 5;
 constexpr float kRecordLabelWidthDip = 80.0f;
+// Compact 打开 / 浏览... / 使用默认 buttons so all three fit beside the path.
+constexpr float kRecordOpenButtonWidthDip = 64.0f;
+constexpr float kRecordBrowseButtonWidthDip = 76.0f;
+constexpr float kRecordDefaultButtonWidthDip = 84.0f;
+constexpr float kRecordButtonGapDip = 8.0f;
 constexpr float kAiLabelWidthDip = 110.0f;
 constexpr float kAiFieldGapDip = 8.0f;
 constexpr float kAiFieldHeightDip = 30.0f;
@@ -260,6 +267,7 @@ enum ControlId
     kIdNotifyAccess,
 
     // Meeting / video notes page (v5.4).
+    kIdRecordOpen,
     kIdRecordBrowse,
     kIdRecordDefault,
     kIdRecordAutoSummary,
@@ -677,6 +685,7 @@ struct DialogLayout
     RectF pageHint;
     RectF recordDirRow;
     RectF recordPathField;
+    RectF recordOpenButton;
     RectF recordBrowseButton;
     RectF recordDefaultButton;
     RectF autoSummaryRow;
@@ -1793,6 +1802,7 @@ private:
 
     // v5.4 page-3 controls: folder picker + custom single-line text editors.
     void BrowseRecordDirectory();
+    void OpenRecordingDirectory();
     std::wstring& FieldText(int index);
     const std::wstring& FieldText(int index) const;
     void FocusTextFieldAtPoint(int index, POINT point);
@@ -2272,20 +2282,25 @@ void SettingsWindow::BuildLayout()
     layout.recordDirRow = CardRow(layout.recordCard, 34.0f, 32.0f);
     {
         const float rowRight = layout.recordDirRow.X + layout.recordDirRow.Width;
-        const float buttonWidth = kButtonWidthDip * scale;
         const float buttonHeight = kButtonHeightDip * scale;
-        const float buttonGap = kButtonGapDip * scale;
+        const float buttonGap = kRecordButtonGapDip * scale;
+        const float openWidth = kRecordOpenButtonWidthDip * scale;
+        const float browseWidth = kRecordBrowseButtonWidthDip * scale;
+        const float defaultWidth = kRecordDefaultButtonWidthDip * scale;
         const float buttonY = layout.recordDirRow.Y +
                               (layout.recordDirRow.Height - buttonHeight) * 0.5f;
         layout.recordDefaultButton =
-            RectF(rowRight - buttonWidth, buttonY, buttonWidth, buttonHeight);
-        layout.recordBrowseButton =
-            RectF(rowRight - buttonWidth * 2.0f - buttonGap, buttonY,
-                  buttonWidth, buttonHeight);
+            RectF(rowRight - defaultWidth, buttonY, defaultWidth, buttonHeight);
+        layout.recordBrowseButton = RectF(
+            layout.recordDefaultButton.X - buttonGap - browseWidth, buttonY,
+            browseWidth, buttonHeight);
+        layout.recordOpenButton = RectF(
+            layout.recordBrowseButton.X - buttonGap - openWidth, buttonY,
+            openWidth, buttonHeight);
         const float pathX =
             layout.recordDirRow.X + kRecordLabelWidthDip * scale;
         layout.recordPathField =
-            RectF(pathX, buttonY, layout.recordBrowseButton.X - buttonGap - pathX,
+            RectF(pathX, buttonY, layout.recordOpenButton.X - buttonGap - pathX,
                   buttonHeight);
     }
     layout.autoSummaryRow = CardRow(layout.recordCard, 76.0f, 30.0f);
@@ -2525,6 +2540,7 @@ void SettingsWindow::BuildLayout()
     }
     else if (m_page == 2)
     {
+        AddControl(kIdRecordOpen, layout.recordOpenButton, true);
         AddControl(kIdRecordBrowse, layout.recordBrowseButton, true);
         AddControl(kIdRecordDefault, layout.recordDefaultButton, true);
         AddControl(kIdRecordAutoSummary, layout.autoSummaryRow, true);
@@ -2896,6 +2912,9 @@ void SettingsWindow::DrawMeetingPage(Painter& painter)
                  m_pending.recordSaveDir.empty() ? palette.panelTextSecondary
                                                  : palette.panelText,
                  255, StringAlignmentNear, StringAlignmentCenter, true);
+    DrawButton(painter, layout.recordOpenButton, L"打开", false,
+               painter.Hovered(kIdRecordOpen),
+               painter.Pressed(kIdRecordOpen));
     DrawButton(painter, layout.recordBrowseButton, L"浏览...", false,
                painter.Hovered(kIdRecordBrowse),
                painter.Pressed(kIdRecordBrowse));
@@ -3836,6 +3855,10 @@ void SettingsWindow::PerformAction(int id)
         SetPage(3);
         return;
 
+    case kIdRecordOpen:
+        RepaintControl(kIdRecordOpen); // drop the pressed state
+        OpenRecordingDirectory();
+        return;
     case kIdRecordBrowse:
         BrowseRecordDirectory();
         return;
@@ -4305,6 +4328,30 @@ void SettingsWindow::BrowseRecordDirectory()
     dialog->Release();
 
     RequestPaintRect(ToPixelRect(m_layout.recordCard));
+}
+
+void SettingsWindow::OpenRecordingDirectory()
+{
+    std::wstring directory = m_pending.recordSaveDir.empty()
+                                 ? DefaultRecordingsDirectory()
+                                 : m_pending.recordSaveDir;
+    if (directory.empty())
+        return;
+
+    // Create it first so Explorer never opens a non-existent path. Failures are
+    // non-modal (a short system beep) so the settings dialog stays responsive.
+    const int result = SHCreateDirectoryExW(nullptr, directory.c_str(), nullptr);
+    if (result != ERROR_SUCCESS && result != ERROR_FILE_EXISTS &&
+        result != ERROR_ALREADY_EXISTS)
+    {
+        MessageBeep(MB_ICONWARNING);
+        return;
+    }
+
+    const HINSTANCE instance = ShellExecuteW(nullptr, L"open", directory.c_str(),
+                                            nullptr, nullptr, SW_SHOWNORMAL);
+    if (reinterpret_cast<INT_PTR>(instance) <= 32)
+        MessageBeep(MB_ICONWARNING);
 }
 
 LRESULT CALLBACK SettingsWindow::WindowProc(HWND hwnd, UINT message,

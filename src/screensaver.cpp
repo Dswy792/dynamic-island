@@ -59,14 +59,14 @@ constexpr UINT kFadeDurationMs = 340;
 constexpr ULONGLONG kGameBlockPostponeSeconds = 5 * 60; // silently retry later
 
 // Notice card geometry (device independent pixels @ 96 DPI).
-constexpr float kNoticeCardWidthDip = 372.0f;
-constexpr float kNoticeCardHeightDip = 124.0f;
+constexpr float kNoticeCardWidthDip = 348.0f;
+constexpr float kNoticeCardHeightDip = 112.0f;
 constexpr float kNoticeShadowDip = 16.0f;
-constexpr float kNoticeRadiusDip = 16.0f;
-constexpr float kNoticeButtonWidthDip = 100.0f;
-constexpr float kNoticeButtonHeightDip = 30.0f;
-constexpr float kNoticeButtonGapDip = 10.0f;
-constexpr float kNoticeContentMarginDip = 20.0f;
+constexpr float kNoticeRadiusDip = 14.0f;
+constexpr float kNoticeButtonWidthDip = 92.0f;
+constexpr float kNoticeButtonHeightDip = 28.0f;
+constexpr float kNoticeButtonGapDip = 8.0f;
+constexpr float kNoticeContentMarginDip = 16.0f;
 
 // Fullscreen overlay chrome.
 constexpr float kBarWidthDip = 420.0f;
@@ -505,6 +505,7 @@ bool IsGameBlocking()
 void EnterOverlayNow();
 void ExitOverlayNow();
 void PostponeNoticeFromUi();
+void SkipNoticeFromUi();
 
 // ---------------------------------------------------------------------------
 // Rest notice (10 s countdown card below the island)
@@ -538,6 +539,7 @@ private:
     RECT CardRectPx() const;
     RECT AcceptRectPx() const;
     RECT PostponeRectPx() const;
+    RECT SkipRectPx() const;
     int HitTest(POINT point) const;
     void UpdateHover(POINT point);
 
@@ -548,7 +550,7 @@ private:
     float m_scale = 1.0f;
     int m_widthPx = 0;
     int m_heightPx = 0;
-    int m_hovered = 0; // 0 none, 1 accept, 2 postpone
+    int m_hovered = 0; // 0 none, 1 accept, 2 postpone, 3 skip
     int m_pressed = 0;
     bool m_trackingMouse = false;
 
@@ -778,8 +780,8 @@ RECT RestNotice::AcceptRectPx() const
     const RECT card = CardRectPx();
     const int width = RoundToInt(kNoticeButtonWidthDip * m_scale);
     const int height = RoundToInt(kNoticeButtonHeightDip * m_scale);
-    const int margin = RoundToInt(16.0f * m_scale);
-    const int bottom = RoundToInt(14.0f * m_scale);
+    const int margin = RoundToInt(14.0f * m_scale);
+    const int bottom = RoundToInt(11.0f * m_scale);
     RECT rect = {};
     rect.right = card.right - margin;
     rect.left = rect.right - width;
@@ -795,6 +797,17 @@ RECT RestNotice::PostponeRectPx() const
     const int gap = RoundToInt(kNoticeButtonGapDip * m_scale);
     RECT rect = accept;
     rect.right = accept.left - gap;
+    rect.left = rect.right - width;
+    return rect;
+}
+
+RECT RestNotice::SkipRectPx() const
+{
+    const RECT postpone = PostponeRectPx();
+    const int width = RoundToInt(kNoticeButtonWidthDip * m_scale);
+    const int gap = RoundToInt(kNoticeButtonGapDip * m_scale);
+    RECT rect = postpone;
+    rect.right = postpone.left - gap;
     rect.left = rect.right - width;
     return rect;
 }
@@ -820,24 +833,31 @@ void RestNotice::Render()
                                                      m_scale));
 
     DrawText(*m_graphics, L"该休息一下了",
-             RectF(cardRect.X + margin, cardRect.Y + RoundToInt(14.0f * m_scale),
+             RectF(cardRect.X + margin, cardRect.Y + RoundToInt(11.0f * m_scale),
                    cardRect.Width - margin * 2.0f,
-                   static_cast<REAL>(RoundToInt(22.0f * m_scale))),
-             std::max(6, RoundToInt(14.5f * m_scale)), true,
+                   static_cast<REAL>(RoundToInt(21.0f * m_scale))),
+             std::max(6, RoundToInt(14.0f * m_scale)), true,
              GdiColor(palette.islandText), StringAlignmentNear,
              StringAlignmentCenter, true);
 
     const std::wstring countdown =
         L"还有 " + ToWString(std::max(0, m_seconds)) + L" 秒进入屏保";
     DrawText(*m_graphics, countdown,
-             RectF(cardRect.X + margin, cardRect.Y + RoundToInt(40.0f * m_scale),
+             RectF(cardRect.X + margin, cardRect.Y + RoundToInt(34.0f * m_scale),
                    cardRect.Width - margin * 2.0f,
-                   static_cast<REAL>(RoundToInt(18.0f * m_scale))),
-             std::max(6, RoundToInt(10.5f * m_scale)), false, GdiColor(secondary),
+                   static_cast<REAL>(RoundToInt(17.0f * m_scale))),
+             std::max(6, RoundToInt(10.0f * m_scale)), false, GdiColor(secondary),
              StringAlignmentNear, StringAlignmentCenter, true);
 
-    const RECT accept = AcceptRectPx();
+    const RECT skip = SkipRectPx();
     const RECT postpone = PostponeRectPx();
+    const RECT accept = AcceptRectPx();
+    DrawButton(*m_graphics,
+               RectF(static_cast<REAL>(skip.left),
+                     static_cast<REAL>(skip.top),
+                     static_cast<REAL>(skip.right - skip.left),
+                     static_cast<REAL>(skip.bottom - skip.top)),
+               L"跳过", false, m_hovered == 3, m_pressed == 3);
     DrawButton(*m_graphics,
                RectF(static_cast<REAL>(postpone.left),
                      static_cast<REAL>(postpone.top),
@@ -934,6 +954,8 @@ int RestNotice::HitTest(POINT point) const
         return 1;
     if (inside(PostponeRectPx()))
         return 2;
+    if (inside(SkipRectPx()))
+        return 3;
     return 0;
 }
 
@@ -1119,6 +1141,11 @@ LRESULT RestNotice::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
             if (hit == 2)
             {
                 PostponeNoticeFromUi();
+                return 0;
+            }
+            if (hit == 3)
+            {
+                SkipNoticeFromUi();
                 return 0;
             }
         }
@@ -3194,6 +3221,14 @@ void PostponeNoticeFromUi()
     if (g_notice.IsVisible())
         g_notice.Destroy();
     ScheduleNext(PostponeMinutes() * 60);
+}
+
+void SkipNoticeFromUi()
+{
+    // Skip this rest entirely: the next rest follows the normal interval.
+    if (g_notice.IsVisible())
+        g_notice.Destroy();
+    ScheduleNext(IntervalMinutes() * 60);
 }
 
 void BlockBecauseOfGame()

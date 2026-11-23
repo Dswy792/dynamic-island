@@ -38,6 +38,10 @@
 
 using namespace Gdiplus;
 
+// Defined in main.cpp: true while the island toast band is on screen. Circular
+// timer minis are pushed below that band while a toast is visible.
+extern bool IsIslandToastVisible();
+
 namespace
 {
 // ---------------------------------------------------------------------------
@@ -46,56 +50,53 @@ namespace
 constexpr wchar_t kTimerWindowClass[] = L"DynamicIslandTimerWindow";
 constexpr wchar_t kMiniWindowClass[] = L"DynamicIslandTimerMini";
 
-constexpr float kCardWidthDip = 384.0f;
-constexpr float kCardHeightDip = 420.0f;
+constexpr float kCardWidthDip = 336.0f;
+constexpr float kCardHeightDip = 352.0f;
 constexpr float kShadowDip = 16.0f;
-constexpr float kCardRadiusDip = 16.0f;
-constexpr float kContentMarginDip = 20.0f;
+constexpr float kCardRadiusDip = 14.0f;
+constexpr float kContentMarginDip = 16.0f;
 
-constexpr float kHeaderTitleTopDip = 14.0f;
-constexpr float kCloseSizeDip = 28.0f;
-constexpr float kCloseMarginDip = 14.0f;
+constexpr float kHeaderTitleTopDip = 11.0f;
+constexpr float kCloseSizeDip = 24.0f;
+constexpr float kCloseMarginDip = 12.0f;
 
-constexpr float kTabsTopDip = 54.0f;
-constexpr float kTabsWidthDip = 200.0f;
-constexpr float kTabsHeightDip = 32.0f;
+constexpr float kTabsTopDip = 46.0f;
+constexpr float kTabsWidthDip = 184.0f;
+constexpr float kTabsHeightDip = 30.0f;
 constexpr float kTabInsetDip = 2.0f;
 
-constexpr float kTimeTopDip = 96.0f;
-constexpr float kTimeHeightDip = 74.0f;
-constexpr float kTimeFontDip = 50.0f;
+constexpr float kTimeTopDip = 84.0f;
+constexpr float kTimeHeightDip = 64.0f;
+constexpr float kTimeFontDip = 44.0f;
 
-constexpr float kStatusTopDip = 174.0f;
-constexpr float kStatusHeightDip = 18.0f;
+constexpr float kStatusTopDip = 150.0f;
+constexpr float kStatusHeightDip = 16.0f;
 
-constexpr float kProgressTopDip = 198.0f;
-constexpr float kProgressHeightDip = 6.0f;
+constexpr float kProgressTopDip = 172.0f;
+constexpr float kProgressHeightDip = 5.0f;
 
-constexpr float kWheelsLabelTopDip = 210.0f;
-constexpr float kWheelsLabelHeightDip = 16.0f;
-constexpr float kWheelsTopDip = 230.0f;
-constexpr float kWheelColumnWidthDip = 96.0f;
-constexpr float kWheelColumnGapDip = 16.0f;
-constexpr float kWheelRowHeightDip = 22.0f;
+constexpr float kWheelsLabelTopDip = 184.0f;
+constexpr float kWheelsLabelHeightDip = 14.0f;
+constexpr float kWheelsTopDip = 200.0f;
+constexpr float kWheelColumnWidthDip = 88.0f;
+constexpr float kWheelColumnGapDip = 12.0f;
+constexpr float kWheelRowHeightDip = 20.0f;
 constexpr int kWheelVisibleRows = 5;
 constexpr float kWheelHeightDip = kWheelRowHeightDip * kWheelVisibleRows;
-constexpr float kChevronSizeDip = 12.0f;
 
-constexpr float kButtonsTopDip = 356.0f;
-constexpr float kButtonHeightDip = 38.0f;
-constexpr float kPrimaryWidthDip = 128.0f;
-constexpr float kSecondaryWidthDip = 104.0f;
-constexpr float kButtonGapDip = 12.0f;
+constexpr float kButtonsTopDip = 306.0f;
+constexpr float kButtonHeightDip = 34.0f;
+constexpr float kPrimaryWidthDip = 116.0f;
+constexpr float kSecondaryWidthDip = 92.0f;
+constexpr float kButtonGapDip = 10.0f;
 
 constexpr int kWheelRanges[3] = {100, 60, 60}; // 时 / 分 / 秒
 
-// Mini sub-islands.
-constexpr float kMiniPillWidthDip = 140.0f;
-constexpr float kMiniPillHeightDip = 36.0f;
-constexpr float kMiniPadDip = 14.0f;
+// Circular mini sub-islands, to the right of the main capsule.
+constexpr float kMiniDiameterDip = 48.0f;
+constexpr float kMiniPadDip = 12.0f;
 constexpr float kMiniGapDip = 8.0f;
-// Below the island toast band (countdown finished toast + pill both visible).
-constexpr float kMiniTopGapDip = 48.0f;
+constexpr float kMiniRightGapDip = 10.0f;
 
 constexpr UINT_PTR kStopwatchTimerId = 1;
 constexpr UINT_PTR kCountdownTimerId = 2;
@@ -197,20 +198,6 @@ std::wstring FormatStopwatchPrecise(ULONGLONG milliseconds)
     return buffer;
 }
 
-std::wstring FormatStopwatchShort(ULONGLONG milliseconds)
-{
-    const ULONGLONG totalSeconds = milliseconds / 1000ULL;
-    const int seconds = static_cast<int>(totalSeconds % 60ULL);
-    const int minutes = static_cast<int>((totalSeconds / 60ULL) % 60ULL);
-    const int hours = static_cast<int>(totalSeconds / 3600ULL);
-    wchar_t buffer[32] = {};
-    if (hours > 0)
-        swprintf_s(buffer, L"%d:%02d:%02d", hours, minutes, seconds);
-    else
-        swprintf_s(buffer, L"%02d:%02d", minutes, seconds);
-    return buffer;
-}
-
 std::wstring FormatCountdownClock(ULONGLONG milliseconds)
 {
     const ULONGLONG totalSeconds = (milliseconds + 999ULL) / 1000ULL;
@@ -222,17 +209,20 @@ std::wstring FormatCountdownClock(ULONGLONG milliseconds)
     return buffer;
 }
 
-std::wstring FormatCountdownShort(ULONGLONG milliseconds)
+// Very compact form for the 48 DIP circular mini islands.
+std::wstring FormatMiniTime(ULONGLONG milliseconds, bool roundUp)
 {
-    const ULONGLONG totalSeconds = (milliseconds + 999ULL) / 1000ULL;
+    ULONGLONG totalSeconds = milliseconds / 1000ULL;
+    if (roundUp && milliseconds % 1000ULL != 0)
+        ++totalSeconds;
     const int seconds = static_cast<int>(totalSeconds % 60ULL);
     const int minutes = static_cast<int>((totalSeconds / 60ULL) % 60ULL);
     const int hours = static_cast<int>(totalSeconds / 3600ULL);
     wchar_t buffer[32] = {};
     if (hours > 0)
-        swprintf_s(buffer, L"%d:%02d:%02d", hours, minutes, seconds);
+        swprintf_s(buffer, L"%d:%02d", hours, minutes);
     else
-        swprintf_s(buffer, L"%02d:%02d", minutes, seconds);
+        swprintf_s(buffer, L"%d:%02d", minutes, seconds);
     return buffer;
 }
 
@@ -275,7 +265,7 @@ private:
     void DrawGlyph(Graphics& graphics, const RectF& box);
     Font* GetFont(int pixelSize, bool bold);
     void ClearFonts();
-    RectF PillRectF() const;
+    RectF CircleRectF() const;
 
     HWND m_hwnd = nullptr;
     HWND m_owner = nullptr;
@@ -323,14 +313,14 @@ void TimerMini::ComputeMetrics()
 {
     m_dpi = m_owner != nullptr ? QueryDpi(m_owner) : 96;
     m_scale = static_cast<float>(m_dpi) / 96.0f;
-    m_widthPx = RoundToInt((kMiniPillWidthDip + kMiniPadDip * 2.0f) * m_scale);
-    m_heightPx = RoundToInt((kMiniPillHeightDip + kMiniPadDip * 2.0f) * m_scale);
+    m_widthPx = RoundToInt((kMiniDiameterDip + kMiniPadDip * 2.0f) * m_scale);
+    m_heightPx = RoundToInt((kMiniDiameterDip + kMiniPadDip * 2.0f) * m_scale);
 }
 
-RectF TimerMini::PillRectF() const
+RectF TimerMini::CircleRectF() const
 {
     return RectF(kMiniPadDip * m_scale, kMiniPadDip * m_scale,
-                 kMiniPillWidthDip * m_scale, kMiniPillHeightDip * m_scale);
+                 kMiniDiameterDip * m_scale, kMiniDiameterDip * m_scale);
 }
 
 bool TimerMini::EnsureSurface()
@@ -521,56 +511,57 @@ void TimerMini::Render()
         return;
     const ThemePalette& palette = GetThemePalette();
     m_graphics->Clear(Color(0, 0, 0, 0));
-    const RectF pill = PillRectF();
-    RenderIslandMaterialRect(*m_graphics, pill, pill.Height * 0.5f, m_dpi,
+    const RectF circle = CircleRectF();
+    const REAL diameter = circle.Height;
+    RenderIslandMaterialRect(*m_graphics, circle, diameter * 0.5f, m_dpi,
                              g_settings.opacity);
+
+    // Countdown progress ring around the circle.
+    if (m_tab == 1)
+    {
+        const REAL ringRadius = diameter * 0.5f - 1.6f * m_scale;
+        const REAL ringWidth = std::max(1.2f, 2.0f * m_scale);
+        const REAL centerX = circle.X + diameter * 0.5f;
+        const REAL centerY = circle.Y + diameter * 0.5f;
+        const RectF ringRect(centerX - ringRadius, centerY - ringRadius,
+                             ringRadius * 2.0f, ringRadius * 2.0f);
+        SolidBrush track(GdiColor(palette.islandText, 38));
+        Pen trackPen(GdiColor(palette.islandText, 38), ringWidth);
+        m_graphics->DrawEllipse(&trackPen, ringRect);
+        (void)track;
+        const float fraction = std::max(0.0f, std::min(1.0f, m_progress));
+        if (!m_finished && fraction > 0.001f)
+        {
+            Pen ringPen(GdiColor(palette.accent, m_paused ? 120 : 230),
+                        ringWidth);
+            m_graphics->DrawArc(&ringPen, ringRect, -90.0f, 360.0f * fraction);
+        }
+    }
 
     if (m_finished)
     {
-        Pen border(GdiColor(palette.accent, 210), std::max(1.2f, m_scale));
-        GraphicsPath borderPath;
-        AddRoundedRectPath(borderPath, pill, pill.Height * 0.5f);
-        m_graphics->DrawPath(&border, &borderPath);
+        Pen border(GdiColor(palette.accent, 220), std::max(1.4f, m_scale));
+        m_graphics->DrawEllipse(&border, circle);
     }
 
-    const RectF glyphBox(pill.X + 12.0f * m_scale,
-                         pill.Y + (pill.Height - 20.0f * m_scale) * 0.5f,
-                         20.0f * m_scale, 20.0f * m_scale);
+    const REAL diameterScale = m_scale;
+    const RectF glyphBox(circle.X + diameter * 0.5f - 7.0f * diameterScale,
+                         circle.Y + 5.0f * diameterScale, 14.0f * diameterScale,
+                         14.0f * diameterScale);
     DrawGlyph(*m_graphics, glyphBox);
 
-    const REAL textLeft = glyphBox.X + glyphBox.Width + 8.0f * m_scale;
-    const RectF textRect(textLeft, pill.Y, pill.Width - (textLeft - pill.X) -
-                                               10.0f * m_scale,
-                         pill.Height);
-    Font* font = GetFont(std::max(6, RoundToInt(14.0f * m_scale)), true);
+    const RectF textRect(circle.X + 2.0f * diameterScale,
+                         circle.Y + diameter - 21.0f * diameterScale,
+                         diameter - 4.0f * diameterScale, 16.0f * diameterScale);
+    Font* font = GetFont(std::max(6, RoundToInt(11.0f * diameterScale)), true);
     StringFormat format;
-    format.SetAlignment(StringAlignmentNear);
+    format.SetAlignment(StringAlignmentCenter);
     format.SetLineAlignment(StringAlignmentCenter);
     format.SetFormatFlags(StringFormatFlagsNoWrap);
     SolidBrush textBrush(GdiColor(m_finished ? palette.accent
                                              : palette.islandText));
     m_graphics->DrawString(m_text.c_str(), static_cast<INT>(m_text.length()),
                            font, textRect, &format, &textBrush);
-
-    if (m_tab == 1 && !m_finished)
-    {
-        const RectF track(pill.X + 12.0f * m_scale,
-                          pill.Y + pill.Height - 7.0f * m_scale,
-                          pill.Width - 24.0f * m_scale, 2.0f * m_scale);
-        if (track.Width > 2.0f)
-        {
-            SolidBrush trackBrush(GdiColor(palette.islandText, 46));
-            m_graphics->FillRectangle(&trackBrush, track);
-            const float fraction = std::max(0.0f, std::min(1.0f, m_progress));
-            if (fraction > 0.0f)
-            {
-                RectF fill = track;
-                fill.Width = track.Width * fraction;
-                SolidBrush fillBrush(GdiColor(palette.accent, 220));
-                m_graphics->FillRectangle(&fillBrush, fill);
-            }
-        }
-    }
     Present();
 }
 
@@ -772,7 +763,7 @@ LRESULT TimerMini::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
     case WM_LBUTTONUP:
     {
         POINT point = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-        const RectF pill = PillRectF();
+        const RectF pill = CircleRectF();
         if (static_cast<float>(point.x) >= pill.X && point.x < pill.X + pill.Width &&
             static_cast<float>(point.y) >= pill.Y &&
             point.y < pill.Y + pill.Height)
@@ -847,9 +838,11 @@ private:
         kClose,
         kTabStopwatch,
         kTabCountdown,
-        kWheelBase,          // + column (0..2)
-        kPrimary,
-        kSecondary,
+        kPrimary = 6,
+        kSecondary = 7,
+        // Wheels use their own high id range: the old contiguous ids made the
+        // primary button look like wheel column 1 and swallowed its clicks.
+        kWheelBase = 20, // + column (0..2)
     };
 
     struct StopwatchState
@@ -1527,7 +1520,7 @@ void TimerWindow::DrawSymbolButton(Graphics& graphics, const RectF& rect,
         SolidBrush brush(GdiColor(pressed ? RGB(72, 72, 80) : RGB(56, 56, 64)));
         graphics.FillEllipse(&brush, rect);
     }
-    Font* font = GetFont(std::max(6, RoundToInt(15.0f * m_scale)), true);
+    Font* font = GetFont(std::max(6, RoundToInt(13.5f * m_scale)), true);
     StringFormat format;
     format.SetAlignment(StringAlignmentCenter);
     format.SetLineAlignment(StringAlignmentCenter);
@@ -1543,7 +1536,7 @@ void TimerWindow::DrawHeader(Graphics& graphics)
 {
     const ThemePalette& palette = GetThemePalette();
     const RectF card = CardRectF();
-    Font* titleFont = GetFont(std::max(6, RoundToInt(15.0f * m_scale)), true);
+    Font* titleFont = GetFont(std::max(6, RoundToInt(14.0f * m_scale)), true);
     StringFormat titleFormat;
     titleFormat.SetAlignment(StringAlignmentNear);
     titleFormat.SetLineAlignment(StringAlignmentCenter);
@@ -1585,7 +1578,7 @@ void TimerWindow::DrawTabs(Graphics& graphics)
             AddRoundedRectPath(selectedPath, rect, rect.Height * 0.5f);
             graphics.FillPath(&selectedBrush, &selectedPath);
         }
-        Font* font = GetFont(std::max(6, RoundToInt(12.5f * m_scale)), selected);
+        Font* font = GetFont(std::max(6, RoundToInt(12.0f * m_scale)), selected);
         StringFormat format;
         format.SetAlignment(StringAlignmentCenter);
         format.SetLineAlignment(StringAlignmentCenter);
@@ -1670,7 +1663,7 @@ void TimerWindow::DrawStatus(Graphics& graphics)
         else
             status = L"滚动滚轮设置时长";
     }
-    Font* font = GetFont(std::max(6, RoundToInt(11.0f * m_scale)), false);
+    Font* font = GetFont(std::max(6, RoundToInt(10.5f * m_scale)), false);
     StringFormat format;
     format.SetAlignment(StringAlignmentCenter);
     format.SetLineAlignment(StringAlignmentCenter);
@@ -1762,7 +1755,7 @@ void TimerWindow::DrawWheelColumn(Graphics& graphics, int column)
         const BYTE alpha = static_cast<BYTE>(
             ClampInt(RoundToInt(255.0f * fade / (1.0f + 0.55f * distance)), 28, 255));
         const int fontDip =
-            distance < 0.5f ? 15 : (distance < 1.5f ? 12 : 10);
+            distance < 0.5f ? 14 : (distance < 1.5f ? 11 : 9);
         Font* font =
             GetFont(std::max(6, RoundToInt(static_cast<float>(fontDip) * m_scale)),
                     distance < 0.5f);
@@ -1796,7 +1789,7 @@ void TimerWindow::DrawWheels(Graphics& graphics)
     for (int column = 0; column < 3; ++column)
     {
         const RectF label = WheelLabelRectF(column);
-        Font* font = GetFont(std::max(6, RoundToInt(10.5f * m_scale)), false);
+        Font* font = GetFont(std::max(6, RoundToInt(10.0f * m_scale)), false);
         StringFormat format;
         format.SetAlignment(StringAlignmentCenter);
         format.SetLineAlignment(StringAlignmentCenter);
@@ -1836,14 +1829,17 @@ void TimerWindow::DrawButtons(Graphics& graphics)
             primaryLabel = L"开始";
         if (!m_countdown.finished && !m_countdown.running &&
             !m_countdown.started && CountdownDisplayMs() == 0)
+        {
             primaryEnabled = false;
+            primaryLabel = L"请先设时长";
+        }
     }
     const std::wstring secondaryLabel =
         m_tab == Tab::Stopwatch ? L"清零" : L"重置";
     DrawPill(graphics, primary, primaryLabel, true, m_hovered == kPrimary,
-             m_pressed == kPrimary, primaryEnabled, 13);
+             m_pressed == kPrimary, primaryEnabled, 12);
     DrawPill(graphics, secondary, secondaryLabel, false,
-             m_hovered == kSecondary, m_pressed == kSecondary, true, 13);
+             m_hovered == kSecondary, m_pressed == kSecondary, true, 12);
 }
 
 void TimerWindow::DrawContent(Graphics& graphics)
@@ -2340,12 +2336,13 @@ void TimerWindow::UpdateMinis()
     const RECT capsule = GetIslandRestingCapsuleRect();
     const UINT dpi = m_owner != nullptr ? QueryDpi(m_owner) : m_dpi;
     const float scale = static_cast<float>(dpi == 0 ? 96 : dpi) / 96.0f;
-    const int pillWidth = RoundToInt(kMiniPillWidthDip * scale);
+    const int diameter = RoundToInt(kMiniDiameterDip * scale);
+    const int pad = RoundToInt(kMiniPadDip * scale);
     const int gap = RoundToInt(kMiniGapDip * scale);
+    const int rightGap = RoundToInt(kMiniRightGapDip * scale);
     const int count = (stopwatchActive ? 1 : 0) + (countdownActive ? 1 : 0);
-    const int totalWidth = count * pillWidth + (count - 1) * gap;
-    int left = (capsule.left + capsule.right) / 2 - totalWidth / 2;
-    const int pillTop = capsule.bottom + RoundToInt(kMiniTopGapDip * scale);
+    const int totalHeight = count * diameter + (count - 1) * gap;
+    const int capsuleCenterY = (capsule.top + capsule.bottom) / 2;
 
     HMONITOR monitor = MonitorFromRect(&capsule, MONITOR_DEFAULTTONEAREST);
     MONITORINFO info = {};
@@ -2353,21 +2350,35 @@ void TimerWindow::UpdateMinis()
     RECT workArea = GetIslandWorkArea();
     if (monitor != nullptr && GetMonitorInfoW(monitor, &info))
         workArea = info.rcWork;
-    if (left + totalWidth > workArea.right)
-        left = workArea.right - totalWidth;
-    if (left < workArea.left)
-        left = workArea.left;
 
+    // Circles live to the RIGHT of the capsule, vertically centred on it.
+    // While an island toast uses the band below the capsule, drop them below it
+    // so both the toast and the timer circles stay fully visible.
+    int pillTop = capsuleCenterY - totalHeight / 2;
+    if (IsIslandToastVisible())
+        pillTop = capsule.bottom + RoundToInt(47.0f * scale);
+    int pillLeft = capsule.right + rightGap;
+    const int windowWidth = diameter + pad * 2;
+    if (pillLeft - pad + windowWidth > workArea.right)
+        pillLeft = workArea.right - windowWidth + pad;
+    if (pillLeft - pad < workArea.left)
+        pillLeft = workArea.left + pad;
+    if (pillTop - pad < workArea.top)
+        pillTop = workArea.top + pad;
+    if (pillTop - pad + totalHeight + pad * 2 > workArea.bottom)
+        pillTop = workArea.bottom - totalHeight - pad;
+
+    int cursorTop = pillTop;
     if (stopwatchActive)
     {
         if (!m_minis[0].Handle())
             m_minis[0].Create(m_owner, 0);
         const ULONGLONG elapsed = StopwatchElapsedMs();
         m_minis[0].Update(!m_stopwatch.running && m_stopwatch.started, false,
-                          FormatStopwatchShort(elapsed), 0.0f);
-        m_minis[0].Place(left, pillTop);
+                          FormatMiniTime(elapsed, false), 0.0f);
+        m_minis[0].Place(pillLeft, cursorTop);
         m_minis[0].SetVisible(true);
-        left += pillWidth + gap;
+        cursorTop += diameter + gap;
     }
     else
     {
@@ -2386,11 +2397,11 @@ void TimerWindow::UpdateMinis()
                 : 0.0f;
         const std::wstring text =
             m_countdown.finished ? std::wstring(L"时间到")
-                                 : FormatCountdownShort(remaining);
+                                 : FormatMiniTime(remaining, true);
         m_minis[1].Update(!m_countdown.running && m_countdown.started &&
                               !m_countdown.finished,
                           m_countdown.finished, text, progress);
-        m_minis[1].Place(left, pillTop);
+        m_minis[1].Place(pillLeft, cursorTop);
         m_minis[1].SetVisible(true);
     }
     else

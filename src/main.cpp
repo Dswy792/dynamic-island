@@ -1827,6 +1827,11 @@ LRESULT CALLBACK IslandWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
 }
 } // namespace
 
+bool IsIslandToastVisible()
+{
+    return s_toastVisible;
+}
+
 // ---------------------------------------------------------------------------
 // Application level commands (declared in island.h)
 // ---------------------------------------------------------------------------

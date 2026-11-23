@@ -4,19 +4,22 @@
 
 #include <string>
 
-// Custom, fully owner-drawn recording dialogs (v5.4).
+// Custom, fully owner-drawn recording dialogs (v5.8.1).
 //
-// Both windows are popup layered windows without a title bar and never appear
+// The dialogs are popup layered windows without a title bar and never appear
 // in the taskbar. The rounded card, its soft shadow, the buttons and (for the
-// duration dialog) the "1 小时 / 2 小时 / 不限制" wheel are rendered with GDI+
-// and presented with UpdateLayeredWindow - exactly like the island and the
-// settings window - so the recording UI uses the same visual language.
+// duration dialog) the three independent 时/分/秒 vertical wheels are rendered
+// with GDI+ and presented with UpdateLayeredWindow - exactly like the island
+// and the settings window - so the recording UI uses the same visual language.
+// v5.8.1 tightened every card to 336 DIP width so a few lines of content no
+// longer float in an oversized window.
 //
 // Callbacks run on the UI thread after the dialog has already been destroyed, so
 // the callback may immediately open the next dialog.
 //
 //   confirm dialog callback : limitSeconds == -1  (the user pressed 开始)
-//   duration dialog callback: limitSeconds == 3600 / 7200 / 0 (unlimited)
+//   duration dialog callback: limitSeconds == H*3600 + M*60 + S (1..86399 s)
+//                             selected with the 时/分/秒 wheels
 //
 // Cancelling (取消 / Esc / closing) does not invoke the callback.
 typedef void (*RecordingDialogCallback)(int limitSeconds, void* context);
@@ -25,7 +28,7 @@ typedef void (*RecordingDialogCallback)(int limitSeconds, void* context);
 void ShowRecordingConfirmDialog(HWND owner, RecordingDialogCallback callback,
                                 void* context);
 
-// Show the duration wheel step ("1 小时" / "2 小时" / "不限制" + 取消 / 开始记录).
+// Show the duration step (时/分/秒 wheels, default 1:00:00, + 取消 / 开始记录).
 void ShowRecordingDurationDialog(HWND owner, RecordingDialogCallback callback,
                                  void* context);
 
