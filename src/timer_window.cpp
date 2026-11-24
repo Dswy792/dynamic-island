@@ -38,10 +38,6 @@
 
 using namespace Gdiplus;
 
-// Defined in main.cpp: true while the island toast band is on screen. Circular
-// timer minis are pushed below that band while a toast is visible.
-extern bool IsIslandToastVisible();
-
 namespace
 {
 // ---------------------------------------------------------------------------
@@ -92,11 +88,9 @@ constexpr float kButtonGapDip = 10.0f;
 
 constexpr int kWheelRanges[3] = {100, 60, 60}; // 时 / 分 / 秒
 
-// Circular mini sub-islands, to the right of the main capsule.
-constexpr float kMiniDiameterDip = 48.0f;
-constexpr float kMiniPadDip = 12.0f;
-constexpr float kMiniGapDip = 8.0f;
-constexpr float kMiniRightGapDip = 10.0f;
+// Notification/recording-style sub-island circles: the diameter is the resting
+// capsule height (computed at runtime), with only a small shadow padding.
+constexpr float kMiniPadDip = 10.0f;
 
 constexpr UINT_PTR kStopwatchTimerId = 1;
 constexpr UINT_PTR kCountdownTimerId = 2;
@@ -242,7 +236,8 @@ void OpenTimerPanelFromMini(int tab);
 class TimerMini
 {
 public:
-    bool Create(HWND owner, int tab);
+    bool Create(HWND owner, int tab, int diameterPx);
+    void SetCircleDiameter(int diameterPx);
     void Destroy();
     void SetVisible(bool visible);
     bool IsVisible() const { return m_visible; }
@@ -258,6 +253,7 @@ private:
     LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);
     bool EnsureClass();
     void ComputeMetrics();
+    void UpdateWindowSize();
     bool EnsureSurface();
     void ReleaseSurface();
     void Render();
@@ -272,10 +268,14 @@ private:
     int m_tab = 0;
     UINT m_dpi = 96;
     float m_scale = 1.0f;
+    int m_circleDiameterPx = 0;
+    int m_padPx = 0;
     int m_widthPx = 0;
     int m_heightPx = 0;
     POINT m_windowPos = {0, 0};
     bool m_visible = false;
+    bool m_hovered = false;
+    bool m_hoverTracking = false;
     bool m_paused = false;
     bool m_finished = false;
     std::wstring m_text;
@@ -313,14 +313,39 @@ void TimerMini::ComputeMetrics()
 {
     m_dpi = m_owner != nullptr ? QueryDpi(m_owner) : 96;
     m_scale = static_cast<float>(m_dpi) / 96.0f;
-    m_widthPx = RoundToInt((kMiniDiameterDip + kMiniPadDip * 2.0f) * m_scale);
-    m_heightPx = RoundToInt((kMiniDiameterDip + kMiniPadDip * 2.0f) * m_scale);
+    m_padPx = RoundToInt(kMiniPadDip * m_scale);
+    UpdateWindowSize();
+}
+
+void TimerMini::UpdateWindowSize()
+{
+    m_widthPx = m_circleDiameterPx + m_padPx * 2;
+    m_heightPx = m_circleDiameterPx + m_padPx * 2;
 }
 
 RectF TimerMini::CircleRectF() const
 {
-    return RectF(kMiniPadDip * m_scale, kMiniPadDip * m_scale,
-                 kMiniDiameterDip * m_scale, kMiniDiameterDip * m_scale);
+    return RectF(static_cast<REAL>(m_padPx), static_cast<REAL>(m_padPx),
+                 static_cast<REAL>(m_circleDiameterPx),
+                 static_cast<REAL>(m_circleDiameterPx));
+}
+
+void TimerMini::SetCircleDiameter(int diameterPx)
+{
+    diameterPx = std::max(12, diameterPx);
+    if (diameterPx == m_circleDiameterPx)
+        return;
+    m_circleDiameterPx = diameterPx;
+    UpdateWindowSize();
+    if (m_hwnd != nullptr)
+    {
+        ReleaseSurface();
+        EnsureSurface();
+        SetWindowPos(m_hwnd, HWND_TOPMOST, m_windowPos.x, m_windowPos.y,
+                     m_widthPx, m_heightPx, SWP_NOACTIVATE);
+        if (m_visible)
+            Render();
+    }
 }
 
 bool TimerMini::EnsureSurface()
@@ -516,19 +541,18 @@ void TimerMini::Render()
     RenderIslandMaterialRect(*m_graphics, circle, diameter * 0.5f, m_dpi,
                              g_settings.opacity);
 
-    // Countdown progress ring around the circle.
+    const REAL ringWidth = std::max(1.0f, diameter * 0.045f);
+
+    // Countdown progress ring hugging the circle edge.
     if (m_tab == 1)
     {
-        const REAL ringRadius = diameter * 0.5f - 1.6f * m_scale;
-        const REAL ringWidth = std::max(1.2f, 2.0f * m_scale);
+        const REAL ringRadius = diameter * 0.5f - ringWidth;
         const REAL centerX = circle.X + diameter * 0.5f;
         const REAL centerY = circle.Y + diameter * 0.5f;
         const RectF ringRect(centerX - ringRadius, centerY - ringRadius,
                              ringRadius * 2.0f, ringRadius * 2.0f);
-        SolidBrush track(GdiColor(palette.islandText, 38));
         Pen trackPen(GdiColor(palette.islandText, 38), ringWidth);
         m_graphics->DrawEllipse(&trackPen, ringRect);
-        (void)track;
         const float fraction = std::max(0.0f, std::min(1.0f, m_progress));
         if (!m_finished && fraction > 0.001f)
         {
@@ -538,30 +562,43 @@ void TimerMini::Render()
         }
     }
 
-    if (m_finished)
-    {
-        Pen border(GdiColor(palette.accent, 220), std::max(1.4f, m_scale));
-        m_graphics->DrawEllipse(&border, circle);
-    }
-
-    const REAL diameterScale = m_scale;
-    const RectF glyphBox(circle.X + diameter * 0.5f - 7.0f * diameterScale,
-                         circle.Y + 5.0f * diameterScale, 14.0f * diameterScale,
-                         14.0f * diameterScale);
-    DrawGlyph(*m_graphics, glyphBox);
-
-    const RectF textRect(circle.X + 2.0f * diameterScale,
-                         circle.Y + diameter - 21.0f * diameterScale,
-                         diameter - 4.0f * diameterScale, 16.0f * diameterScale);
-    Font* font = GetFont(std::max(6, RoundToInt(11.0f * diameterScale)), true);
     StringFormat format;
     format.SetAlignment(StringAlignmentCenter);
     format.SetLineAlignment(StringAlignmentCenter);
     format.SetFormatFlags(StringFormatFlagsNoWrap);
     SolidBrush textBrush(GdiColor(m_finished ? palette.accent
                                              : palette.islandText));
-    m_graphics->DrawString(m_text.c_str(), static_cast<INT>(m_text.length()),
-                           font, textRect, &format, &textBrush);
+
+    if (m_hovered && !m_finished)
+    {
+        Pen hoverBorder(GdiColor(palette.islandText, 80),
+                        std::max(1.0f, ringWidth));
+        m_graphics->DrawEllipse(&hoverBorder, circle);
+    }
+
+    if (m_finished)
+    {
+        Pen border(GdiColor(palette.accent, 220), std::max(1.2f, ringWidth));
+        m_graphics->DrawEllipse(&border, circle);
+        Font* font =
+            GetFont(std::max(7, RoundToInt(diameter * 0.200f)), true);
+        m_graphics->DrawString(m_text.c_str(), static_cast<INT>(m_text.length()),
+                               font, circle, &format, &textBrush);
+    }
+    else
+    {
+        const REAL glyphSize = diameter * 0.32f;
+        const RectF glyphBox(circle.X + diameter * 0.5f - glyphSize * 0.5f,
+                             circle.Y + diameter * 0.10f, glyphSize, glyphSize);
+        DrawGlyph(*m_graphics, glyphBox);
+
+        const RectF textRect(circle.X + 1.0f, circle.Y + diameter * 0.47f,
+                             diameter - 2.0f, diameter * 0.40f);
+        Font* font =
+            GetFont(std::max(7, RoundToInt(diameter * 0.26f)), true);
+        m_graphics->DrawString(m_text.c_str(), static_cast<INT>(m_text.length()),
+                               font, textRect, &format, &textBrush);
+    }
     Present();
 }
 
@@ -622,15 +659,20 @@ void TimerMini::Present()
                         &sourcePoint, 0, &blend, ULW_ALPHA);
 }
 
-bool TimerMini::Create(HWND owner, int tab)
+bool TimerMini::Create(HWND owner, int tab, int diameterPx)
 {
     if (m_hwnd != nullptr)
+    {
+        SetCircleDiameter(diameterPx);
         return true;
+    }
     if (!EnsureClass())
         return false;
     m_owner = owner;
     m_tab = tab;
     ComputeMetrics();
+    m_circleDiameterPx = std::max(12, diameterPx);
+    UpdateWindowSize();
     if (!EnsureSurface())
         return false;
 
@@ -670,8 +712,7 @@ void TimerMini::Place(int pillLeft, int pillTop)
 {
     if (m_hwnd == nullptr)
         return;
-    const int pad = RoundToInt(kMiniPadDip * m_scale);
-    const POINT position = {pillLeft - pad, pillTop - pad};
+    const POINT position = {pillLeft - m_padPx, pillTop - m_padPx};
     if (position.x == m_windowPos.x && position.y == m_windowPos.y)
         return;
     m_windowPos = position;
@@ -760,6 +801,41 @@ LRESULT TimerMini::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         return 1;
     case WM_MOUSEACTIVATE:
         return MA_NOACTIVATE;
+    case WM_MOUSEMOVE:
+    {
+        if (!m_hoverTracking)
+        {
+            TRACKMOUSEEVENT track = {};
+            track.cbSize = sizeof(track);
+            track.dwFlags = TME_LEAVE;
+            track.hwndTrack = m_hwnd;
+            TrackMouseEvent(&track);
+            m_hoverTracking = true;
+        }
+        POINT point = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        const RectF circle = CircleRectF();
+        const bool inside =
+            static_cast<REAL>(point.x) >= circle.X &&
+            static_cast<REAL>(point.x) < circle.X + circle.Width &&
+            static_cast<REAL>(point.y) >= circle.Y &&
+            static_cast<REAL>(point.y) < circle.Y + circle.Height;
+        if (inside != m_hovered)
+        {
+            m_hovered = inside;
+            if (m_visible)
+                Render();
+        }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        m_hoverTracking = false;
+        if (m_hovered)
+        {
+            m_hovered = false;
+            if (m_visible)
+                Render();
+        }
+        return 0;
     case WM_LBUTTONUP:
     {
         POINT point = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
@@ -783,6 +859,11 @@ LRESULT TimerMini::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         ComputeMetrics();
         ReleaseSurface();
         EnsureSurface();
+        if (m_hwnd != nullptr)
+        {
+            SetWindowPos(m_hwnd, HWND_TOPMOST, m_windowPos.x, m_windowPos.y,
+                         m_widthPx, m_heightPx, SWP_NOACTIVATE);
+        }
         Render();
         return 0;
     case WM_DESTROY:
@@ -2320,8 +2401,11 @@ void TimerWindow::UpdateMinis()
     const bool islandHidden = IsIslandHiddenTarget() ||
                               GetIslandHideProgress() > 0.05f;
     const bool screensaverActive = IsScreensaverActive();
+    // Notification sub-island circles use the same row right of the capsule;
+    // hide the timer circles while they are on screen to avoid overlapping.
+    const bool notificationCircles = IsAnySubIslandVisible();
     const bool suppress = m_visible || featureRow || islandHidden ||
-                          screensaverActive;
+                          screensaverActive || notificationCircles;
 
     const bool stopwatchActive = m_stopwatch.started;
     const bool countdownActive = m_countdown.started || m_countdown.finished;
@@ -2336,12 +2420,13 @@ void TimerWindow::UpdateMinis()
     const RECT capsule = GetIslandRestingCapsuleRect();
     const UINT dpi = m_owner != nullptr ? QueryDpi(m_owner) : m_dpi;
     const float scale = static_cast<float>(dpi == 0 ? 96 : dpi) / 96.0f;
-    const int diameter = RoundToInt(kMiniDiameterDip * scale);
-    const int pad = RoundToInt(kMiniPadDip * scale);
-    const int gap = RoundToInt(kMiniGapDip * scale);
-    const int rightGap = RoundToInt(kMiniRightGapDip * scale);
+    // Exactly the notification/recording sub-island circle: diameter = capsule
+    // height, never a hard-coded DIP value.
+    const int diameter =
+        std::max(12, static_cast<int>(capsule.bottom - capsule.top));
+    const int gap = RoundToInt(static_cast<float>(kSubIslandGapDip) * scale);
     const int count = (stopwatchActive ? 1 : 0) + (countdownActive ? 1 : 0);
-    const int totalHeight = count * diameter + (count - 1) * gap;
+    const int totalWidth = count * diameter + (count - 1) * gap;
     const int capsuleCenterY = (capsule.top + capsule.bottom) / 2;
 
     HMONITOR monitor = MonitorFromRect(&capsule, MONITOR_DEFAULTTONEAREST);
@@ -2351,34 +2436,33 @@ void TimerWindow::UpdateMinis()
     if (monitor != nullptr && GetMonitorInfoW(monitor, &info))
         workArea = info.rcWork;
 
-    // Circles live to the RIGHT of the capsule, vertically centred on it.
-    // While an island toast uses the band below the capsule, drop them below it
-    // so both the toast and the timer circles stay fully visible.
-    int pillTop = capsuleCenterY - totalHeight / 2;
-    if (IsIslandToastVisible())
-        pillTop = capsule.bottom + RoundToInt(47.0f * scale);
-    int pillLeft = capsule.right + rightGap;
-    const int windowWidth = diameter + pad * 2;
-    if (pillLeft - pad + windowWidth > workArea.right)
-        pillLeft = workArea.right - windowWidth + pad;
-    if (pillLeft - pad < workArea.left)
-        pillLeft = workArea.left + pad;
-    if (pillTop - pad < workArea.top)
-        pillTop = workArea.top + pad;
-    if (pillTop - pad + totalHeight + pad * 2 > workArea.bottom)
-        pillTop = workArea.bottom - totalHeight - pad;
+    // Horizontal row immediately to the RIGHT of the capsule, centred on it.
+    int pillLeft = capsule.right + gap;
+    int pillTop = capsuleCenterY - diameter / 2;
+    // Clamp the visible circles (not the shadow padding) so the row keeps the
+    // capsule's centre line exactly.
+    if (pillLeft + totalWidth > workArea.right)
+        pillLeft = workArea.right - totalWidth;
+    if (pillLeft < workArea.left)
+        pillLeft = workArea.left;
+    if (pillTop < workArea.top)
+        pillTop = workArea.top;
+    if (pillTop + diameter > workArea.bottom)
+        pillTop = workArea.bottom - diameter;
 
-    int cursorTop = pillTop;
+    int cursorLeft = pillLeft;
     if (stopwatchActive)
     {
         if (!m_minis[0].Handle())
-            m_minis[0].Create(m_owner, 0);
+            m_minis[0].Create(m_owner, 0, diameter);
+        else
+            m_minis[0].SetCircleDiameter(diameter);
         const ULONGLONG elapsed = StopwatchElapsedMs();
         m_minis[0].Update(!m_stopwatch.running && m_stopwatch.started, false,
                           FormatMiniTime(elapsed, false), 0.0f);
-        m_minis[0].Place(pillLeft, cursorTop);
+        m_minis[0].Place(cursorLeft, pillTop);
         m_minis[0].SetVisible(true);
-        cursorTop += diameter + gap;
+        cursorLeft += diameter + gap;
     }
     else
     {
@@ -2388,7 +2472,9 @@ void TimerWindow::UpdateMinis()
     if (countdownActive)
     {
         if (!m_minis[1].Handle())
-            m_minis[1].Create(m_owner, 1);
+            m_minis[1].Create(m_owner, 1, diameter);
+        else
+            m_minis[1].SetCircleDiameter(diameter);
         const ULONGLONG remaining = CountdownRemainingMs();
         const float progress =
             m_countdown.durationMs > 0
@@ -2401,7 +2487,7 @@ void TimerWindow::UpdateMinis()
         m_minis[1].Update(!m_countdown.running && m_countdown.started &&
                               !m_countdown.finished,
                           m_countdown.finished, text, progress);
-        m_minis[1].Place(pillLeft, cursorTop);
+        m_minis[1].Place(cursorLeft, pillTop);
         m_minis[1].SetVisible(true);
     }
     else
